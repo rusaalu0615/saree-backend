@@ -3,7 +3,7 @@ import productController from "../controllers/productController.js";
 import upLoadImage from "../middlewares/uploadImage.js";
 import upLoadVideo from "../middlewares/uploadVedio.js";
 
-const { addProduct, getAllProducts, getProductById, deleteProduct, updateProduct } = productController;
+const { addProduct, getAllProducts, getProductById, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo } = productController;
 
 const router = express.Router();
 
@@ -37,7 +37,9 @@ router.put("/upload-video/:id", upLoadVideo.single("videoFile"), async (req, res
 });
 
 router.get("/allproducts", getAllProducts);
+router.delete("/bulk-delete", deleteMultipleProducts);
 router.get("/:id", getProductById);
 router.delete("/:id", deleteProduct);
+router.put("/:id/gallery-image-info", updateGalleryImageInfo);
 
 export default router;

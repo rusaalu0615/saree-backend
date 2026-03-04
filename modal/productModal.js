@@ -7,6 +7,7 @@ const productSchema = new mongoose.Schema({
     },
     sku: {
         type: String,
+        required: true,
     },
     category: {
         type: String,
@@ -14,6 +15,7 @@ const productSchema = new mongoose.Schema({
     },
     regularPrice: {
         type: Number,
+        required: true,
     },
     price: {
         type: Number,
@@ -26,41 +28,61 @@ const productSchema = new mongoose.Schema({
     },
     shortDescription: {
         type: String,
+        required: true,
     },
     tags: {
         type: String,
+        required: true,
     },
     mainImage: {
         type: String,
         required: true,
     },
+    mainImageInfo: {
+        title: { type: String, default: "" },
+        description: { type: String, default: "" },
+        alt: { type: String, default: "" },
+        caption: { type: String, default: "" },
+    },
     galleryImages: [{
-        type: String,
+        url: { type: String, required: true },
+        title: { type: String, default: "" },
+        description: { type: String, default: "" },
+        alt: { type: String, default: "" },
+        caption: { type: String, default: "" },
     }],
     color: {
         type: String,
+        required: true,
     },
     // Specifications
     material: {
         type: String,
+        required: true,
     },
     sareeSize: {
         type: String,
+        required: true,
     },
     blouseSize: {
         type: String,
+        required: true,
     },
     washCare: {
         type: String,
+        required: true,
     },
     dispatch: {
         type: String,
+        default: "2-3 days",
     },
     disclaimer: {
         type: String,
+        default: "Color variance note",
     },
     internationalNote: {
         type: String,
+        default: "Custom duties",
     },
     // Video
     videoUrl: {
