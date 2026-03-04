@@ -78,7 +78,7 @@ const productSchema = new mongoose.Schema({
     },
     disclaimer: {
         type: String,
-        default: "Color variance note",
+        default: "Actual product color may differ slightly from the images due to lighting and display differences.",
     },
     internationalNote: {
         type: String,
