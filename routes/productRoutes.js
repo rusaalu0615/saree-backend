@@ -13,7 +13,7 @@ router.get("/allproducts", getAllProducts);
 router.get("/:id", getProductById);
 
 // Protected routes (require authentication)
-router.post("/add-product", protect, upLoadImage.fields([
+router.post("/add-product", upLoadImage.fields([
     { name: "mainImage", maxCount: 1 },
     { name: "galleryImages", maxCount: 10 },
     { name: "videoFile", maxCount: 1 },
