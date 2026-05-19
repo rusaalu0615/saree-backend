@@ -5,10 +5,12 @@ import nodemailer from "nodemailer";
  */
 const getTransporter = () => {
     // Standardizing on port 587 (STARTTLS) which has much higher reliability on cloud platforms like Render
+    // We force family: 4 (IPv4) to prevent ENETUNREACH errors on cloud container networks without IPv6
     return nodemailer.createTransport({
         host: "smtp.gmail.com",
         port: 587,
         secure: false,
+        family: 4,
         auth: {
             user: process.env.EMAIL_USER,
             pass: process.env.EMAIL_PASS,
