@@ -31,10 +31,14 @@ const adminProtect = async (req, res, next) => {
 
         // 4. Assert user role is strictly admin
         // We also check whitelist to guarantee high security in case role is manually mutated
-        const whitelistedEmails = (process.env.ADMIN_EMAILS || "")
+        const fromEnv = (process.env.ADMIN_EMAILS || "")
             .split(",")
             .map(e => e.trim().toLowerCase())
             .filter(Boolean);
+        
+        // Fallback default admin list to prevent Render environment variable misconfiguration lockouts
+        const defaultAdmins = ["hemloeth@gmail.com"];
+        const whitelistedEmails = Array.from(new Set([...fromEnv, ...defaultAdmins]));
 
         const isWhitelisted = whitelistedEmails.includes(user.email.toLowerCase());
 

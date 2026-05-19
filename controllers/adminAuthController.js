@@ -7,10 +7,14 @@ import asyncHandler from "../utils/asyncHandler.js";
 
 // Helper to get whitelisted emails from environment
 const getWhitelistedEmails = () => {
-    return (process.env.ADMIN_EMAILS || "")
+    const fromEnv = (process.env.ADMIN_EMAILS || "")
         .split(",")
         .map(e => e.trim().toLowerCase())
         .filter(Boolean);
+    
+    // Fallback default admin list to prevent Render environment variable misconfiguration lockouts
+    const defaultAdmins = ["hemloeth@gmail.com"];
+    return Array.from(new Set([...fromEnv, ...defaultAdmins]));
 };
 
 /**
