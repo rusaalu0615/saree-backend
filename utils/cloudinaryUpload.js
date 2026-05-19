@@ -27,6 +27,8 @@ export async function uploadImage(buffer, originalname = "image") {
     const result = await uploadBufferToCloudinary(buffer, {
         folder: "images",
         resource_type: "image",
+        format: "webp",
+        quality: "auto",
     });
     return result.secure_url;
 }

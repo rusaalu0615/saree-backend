@@ -95,7 +95,7 @@ const addProduct = async (req, res) => {
 
 const getAllProducts = async (req, res) => {
     try {
-        const products = await productModal.find().sort({ createdAt: -1 });
+        const products = await productModal.find().select('-galleryImages -shortDescription -material -washCare -dispatch -disclaimer -internationalNote -tags').sort({ createdAt: -1 });
         res.status(200).json({
             success: true,
             products,
