@@ -4,17 +4,22 @@ import nodemailer from "nodemailer";
  * Configure Nodemailer transporter
  */
 const getTransporter = () => {
-    // Switching back to 'service' helper but keeping high timeouts.
-    // Sometimes the built-in helper works better with cloud firewalls.
+    // Standardizing on port 587 (STARTTLS) which has much higher reliability on cloud platforms like Render
     return nodemailer.createTransport({
-        service: "gmail",
+        host: "smtp.gmail.com",
+        port: 587,
+        secure: false,
         auth: {
             user: process.env.EMAIL_USER,
             pass: process.env.EMAIL_PASS,
         },
-        connectionTimeout: 20000,
-        greetingTimeout: 20000,
-        socketTimeout: 30000,
+        tls: {
+            rejectUnauthorized: false,
+            minVersion: "TLSv1.2",
+        },
+        connectionTimeout: 30000,
+        greetingTimeout: 30000,
+        socketTimeout: 45000,
     });
 };
 
