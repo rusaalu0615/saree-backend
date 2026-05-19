@@ -293,7 +293,59 @@ export const sendAdminOTPEmail = async (email, otp) => {
             return true;
         }
 
-        // 2. Fallback to standard Nodemailer SMTP
+        // 2. Support Brevo (Sendinblue) HTTP API integration (highly reliable, free public domains permitted)
+        if (process.env.BREVO_API_KEY) {
+            console.log(`[Email] Using Brevo API for OTP delivery to ${email}...`);
+            const senderEmail = process.env.BREVO_SENDER || "rustamali3488@gmail.com";
+            const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+                method: "POST",
+                headers: {
+                    "api-key": process.env.BREVO_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    sender: { name: "Linen Saree Admin", email: senderEmail },
+                    to: [{ email: email }],
+                    subject: `Admin Verification OTP - ${otp}`,
+                    htmlContent: `
+                        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
+                            <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
+                                <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">LINEN SAREE</h1>
+                                <p style="margin: 5px 0 0 0; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; color: #888;">Administrative Control Center</p>
+                            </div>
+                            
+                            <div style="padding: 10px 0;">
+                                <h2 style="margin-top: 0; color: #444; font-size: 18px;">Admin OTP Verification</h2>
+                                <p style="line-height: 1.5; color: #555;">You are attempting to log into the administrative control panel. Use the verification code below to authorize your session.</p>
+                                
+                                <div style="background-color: #fcfbfa; border: 1px dashed #c4a77d; border-radius: 6px; padding: 20px; text-align: center; margin: 25px 0;">
+                                    <span style="font-family: monospace; font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #8B7355;">${otp}</span>
+                                </div>
+                                
+                                <p style="font-size: 13px; color: #666; line-height: 1.5; background-color: #f7f7f7; padding: 10px; border-radius: 4px;">
+                                    <strong>Security Notice:</strong> This code is valid for exactly <strong>5 minutes</strong> and can only be used once. If you did not initiate this request, please ignore this email.
+                                </p>
+                            </div>
+                            
+                            <div style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px; text-align: center; font-size: 11px; color: #999;">
+                                &copy; ${new Date().getFullYear()} Linen Saree E-Commerce. All rights reserved.
+                            </div>
+                        </div>
+                    `
+                })
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                throw new Error(`Brevo API Error: ${res.status} - ${errText}`);
+            }
+
+            const data = await res.json();
+            console.log(`[Email] Admin OTP sent successfully via Brevo API: ${data.messageId}`);
+            return true;
+        }
+
+        // 3. Fallback to standard Nodemailer SMTP
         if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
             const msg = "[Email] Critical configuration error: EMAIL_USER or EMAIL_PASS not set in environment variables";
             console.error(msg);
