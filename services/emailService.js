@@ -1,4 +1,9 @@
 import nodemailer from "nodemailer";
+import dns from "dns";
+
+// Force Node.js to prefer IPv4 DNS resolution globally. This completely eliminates ENETUNREACH 
+// errors when attempting to connect to Google SMTP servers in IPv6-unsupported container networks (like Render).
+dns.setDefaultResultOrder("ipv4first");
 
 /**
  * Configure Nodemailer transporter
