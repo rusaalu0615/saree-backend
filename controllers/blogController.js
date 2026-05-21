@@ -118,4 +118,29 @@ const updateBlog = async (req, res) => {
     }
 };
 
-export default { addBlog, getAllBlogs, deleteBlog, updateBlog };
+const getBlogById = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const blog = await blogModal.findById(id);
+
+        if (!blog) {
+            return res.status(404).json({
+                success: false,
+                message: "Blog post not found",
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            blog,
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    }
+};
+
+export default { addBlog, getAllBlogs, deleteBlog, updateBlog, getBlogById };
