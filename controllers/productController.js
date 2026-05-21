@@ -239,6 +239,7 @@ const updateProduct = async (req, res) => {
             material, sareeSize, blouseSize, washCare, dispatch,
             disclaimer, internationalNote, videoUrl,
             isOnSale, isNewArrival, productCollection,
+            removeVideo,
             galleryImageInfos: galleryImageInfosRaw,
             existingGalleryImages: existingGalleryImagesRaw,
         } = req.body;
@@ -256,8 +257,12 @@ const updateProduct = async (req, res) => {
         };
 
         Object.entries(textFields).forEach(([key, value]) => {
-            if (value !== undefined && value !== "") {
-                updateData[key] = numberFields.includes(key) ? Number(value) : value;
+            if (value !== undefined) {
+                if (value === "") {
+                    updateData[key] = numberFields.includes(key) ? null : "";
+                } else {
+                    updateData[key] = numberFields.includes(key) ? Number(value) : value;
+                }
             }
         });
 
@@ -309,6 +314,8 @@ const updateProduct = async (req, res) => {
         }
         if (videoPromiseIdx !== -1) {
             updateData.videoFile = uploadResults[videoPromiseIdx];
+        } else if (removeVideo === "true" || removeVideo === true) {
+            updateData.videoFile = "";
         }
 
         // Handle gallery images: merge existing (with metadata) + newly uploaded
@@ -336,7 +343,7 @@ const updateProduct = async (req, res) => {
         }));
 
         // Combine: existing images (with updated metadata) + newly uploaded
-        if (existingGallery.length > 0 || newGalleryImages.length > 0) {
+        if (existingGalleryImagesRaw !== undefined || newGalleryImages.length > 0) {
             updateData.galleryImages = [...existingGallery, ...newGalleryImages];
         }
 
