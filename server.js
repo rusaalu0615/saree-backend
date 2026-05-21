@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import connectDB from "./config/db.js";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import indexRoutes from "./routes/index.js";
 import categoryBannerRoutes from "./routes/categoryBannerRoutes.js";
 import { globalLimiter } from "./middlewares/rateLimiter.js";
@@ -34,7 +35,9 @@ app.use(cors({
     credentials: true
 }));
 
-app.use(express.json())
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 app.use((req, res, next) => {
     console.log(`${req.method} ${req.url}`);
@@ -47,22 +50,32 @@ app.use("/api", globalLimiter);
 // Serve uploads folder
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-connectDB()
-
-app.use("/api", indexRoutes)
-app.use("/api/category-banner", categoryBannerRoutes)
+app.use("/api", indexRoutes);
+app.use("/api/category-banner", categoryBannerRoutes);
 
 // Global JSON Error Handler
 app.use((err, req, res, next) => {
     console.error("[Global Error Handler]:", err);
+
     res.status(err.status || 500).json({
         success: false,
         message: err.message || "Internal server error"
     });
 });
 
-const PORT = process.env.PORT || 5000
+const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`)
-})
+const startServer = async () => {
+    try {
+        await connectDB();
+
+        app.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+        });
+
+    } catch (error) {
+        console.error("Server startup failed:", error);
+    }
+};
+
+startServer();
