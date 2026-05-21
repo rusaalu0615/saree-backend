@@ -14,11 +14,22 @@ const __dirname = path.dirname(__filename);
 
 const app = express()
 
+const allowedOrigins = [
+    "https://linen-saree.vercel.app",
+    "http://localhost:3000",
+    "https://www.linen-saree.vercel.app"
+];
+
 // Dynamic origin CORS support allowing credentials
 app.use(cors({
     origin: (origin, callback) => {
-        // Return requesting origin to allow credentials transport dynamically
-        callback(null, origin || true);
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
     },
     credentials: true
 }));
