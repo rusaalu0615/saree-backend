@@ -9,40 +9,7 @@ dns.setDefaultResultOrder("ipv4first");
  * Configure Nodemailer transporter
  */
 const getTransporter = () => {
-    // 1. If BREVO_API_KEY is configured in the environment, we return a custom transparent transporter
-    // that routes Nodemailer's sendMail calls over secure HTTPS (port 443) to bypass Render's SMTP port blocks completely.
-    if (process.env.BREVO_API_KEY) {
-        return {
-            sendMail: async (mailOptions) => {
-                console.log(`[Email] Routing Nodemailer sendMail via Brevo HTTPS API...`);
-                const senderEmail = process.env.BREVO_SENDER || "rustamali3488@gmail.com";
-                
-                const res = await fetch("https://api.brevo.com/v3/smtp/email", {
-                    method: "POST",
-                    headers: {
-                        "api-key": process.env.BREVO_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify({
-                        sender: { name: "Linen Saree Admin", email: senderEmail },
-                        to: [{ email: mailOptions.to }],
-                        subject: mailOptions.subject,
-                        htmlContent: mailOptions.html
-                    })
-                });
-
-                if (!res.ok) {
-                    const errText = await res.text();
-                    throw new Error(`Brevo HTTPS Transport Error: ${res.status} - ${errText}`);
-                }
-
-                const data = await res.json();
-                return { messageId: data.messageId || "brevo-http-session" };
-            }
-        };
-    }
-
-    // 2. Otherwise, fall back to standard SMTP (ideal for local testing and default setups)
+    // Return standard SMTP transporter
     // We force family: 4 (IPv4) to prevent ENETUNREACH errors on cloud container networks without IPv6
     return nodemailer.createTransport({
         host: "smtp.gmail.com",
