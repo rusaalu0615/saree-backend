@@ -4,6 +4,7 @@ import connectDB from "./config/db.js";
 import cors from "cors";
 import indexRoutes from "./routes/index.js";
 import categoryBannerRoutes from "./routes/categoryBannerRoutes.js";
+import { globalLimiter } from "./middlewares/rateLimiter.js";
 
 import path from "path";
 import { fileURLToPath } from "url";
@@ -13,12 +14,25 @@ const __dirname = path.dirname(__filename);
 
 const app = express()
 
-app.use(cors())
+// Dynamic origin CORS support allowing credentials
+app.use(cors({
+    origin: (origin, callback) => {
+        // Return requesting origin to allow credentials transport dynamically
+        callback(null, origin || true);
+    },
+    credentials: true
+}));
+
 app.use(express.json())
+
 app.use((req, res, next) => {
     console.log(`${req.method} ${req.url}`);
     next();
 })
+
+// Apply global rate limiter to all api routes
+app.use("/api", globalLimiter);
+
 // Serve uploads folder
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
@@ -26,6 +40,15 @@ connectDB()
 
 app.use("/api", indexRoutes)
 app.use("/api/category-banner", categoryBannerRoutes)
+
+// Global JSON Error Handler
+app.use((err, req, res, next) => {
+    console.error("[Global Error Handler]:", err);
+    res.status(err.status || 500).json({
+        success: false,
+        message: err.message || "Internal server error"
+    });
+});
 
 const PORT = process.env.PORT || 5000
 

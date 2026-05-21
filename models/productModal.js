@@ -110,4 +110,26 @@ const productSchema = new mongoose.Schema({
     },
 }, { timestamps: true });
 
+productSchema.index(
+    {
+        name: "text",
+        category: "text",
+        tags: "text",
+        color: "text",
+        material: "text",
+        shortDescription: "text"
+    },
+    {
+        weights: {
+            name: 10,
+            category: 5,
+            color: 3,
+            material: 3,
+            tags: 2,
+            shortDescription: 1
+        },
+        name: "ProductTextIndex"
+    }
+);
+
 export default mongoose.model("Product", productSchema);

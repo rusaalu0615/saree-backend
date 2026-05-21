@@ -1,19 +1,35 @@
 import jwt from "jsonwebtoken";
 import User from "../models/userModal.js";
 
+const parseCookies = (cookieHeader) => {
+    const list = {};
+    if (!cookieHeader) return list;
+    cookieHeader.split(";").forEach(cookie => {
+        const parts = cookie.split("=");
+        list[parts.shift().trim()] = decodeURIComponent(parts.join("="));
+    });
+    return list;
+};
+
 /**
  * Middleware to restrict route access strictly to authenticated Admins
  */
 const adminProtect = async (req, res, next) => {
     try {
         const authHeader = req.headers.authorization;
+        const cookies = parseCookies(req.headers.cookie);
 
-        // 1. Assert authorization header exists and has correct format
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            return res.status(401).json({ message: "Access denied. No session token provided." });
+        let token = null;
+        if (authHeader && authHeader.startsWith("Bearer ")) {
+            token = authHeader.split(" ")[1];
+        } else if (cookies.auth_token) {
+            token = cookies.auth_token;
         }
 
-        const token = authHeader.split(" ")[1];
+        // 1. Assert token exists
+        if (!token) {
+            return res.status(401).json({ message: "Access denied. No session token provided." });
+        }
 
         // 2. Verify token
         let decoded;

@@ -24,7 +24,7 @@ const cartSchema = new mongoose.Schema({
     },
 })
 
-const wishListScheam = new mongoose.Schema({
+const wishListSchema = new mongoose.Schema({
     productId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Product",
@@ -46,6 +46,9 @@ const userSchema = new mongoose.Schema({
     email: {
         type: String,
         required: true,
+        unique: true,
+        lowercase: true,
+        trim: true,
     },
     phone: {
         type: String,
@@ -61,7 +64,7 @@ const userSchema = new mongoose.Schema({
     },
     address: [addressSchema],
     cart: [cartSchema],
-    wishList: [wishListScheam],
+    wishList: [wishListSchema],
 }, { timestamps: true });
 
 export default mongoose.model("User", userSchema);

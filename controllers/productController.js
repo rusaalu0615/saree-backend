@@ -95,7 +95,28 @@ const addProduct = async (req, res) => {
 
 const getAllProducts = async (req, res) => {
     try {
-        const products = await productModal.find().select('-galleryImages -shortDescription -material -washCare -dispatch -disclaimer -internationalNote -tags').sort({ createdAt: -1 });
+        const { search, q, category } = req.query;
+        const searchQuery = search || q;
+
+        const filter = {};
+        const projection = {};
+        let sort = { createdAt: -1 };
+
+        if (searchQuery) {
+            filter.$text = { $search: searchQuery };
+            projection.score = { $meta: "textScore" };
+            sort = { score: { $meta: "textScore" } };
+        }
+
+        if (category) {
+            filter.category = category;
+        }
+
+        const products = await productModal
+            .find(filter, projection)
+            .select('-galleryImages -shortDescription -material -washCare -dispatch -disclaimer -internationalNote -tags')
+            .sort(sort);
+
         res.status(200).json({
             success: true,
             products,
