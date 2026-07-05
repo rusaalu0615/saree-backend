@@ -168,4 +168,14 @@ const resetPassword = asyncHandler(async (req, res) => {
     res.status(200).json({ message: "Password reset successfully" });
 });
 
-export default { registerUser, loginUser, forgotPassword, verifyOtp, resetPassword }
+const logoutUser = asyncHandler(async (req, res) => {
+    res.cookie("auth_token", "", {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        expires: new Date(0) // Expire immediately
+    });
+    res.status(200).json({ message: "Logged out successfully" });
+});
+
+export default { registerUser, loginUser, logoutUser, forgotPassword, verifyOtp, resetPassword }
