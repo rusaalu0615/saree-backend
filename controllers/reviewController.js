@@ -2,6 +2,7 @@ import Review from "../models/reviewModal.js";
 import Product from "../models/productModal.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import { uploadImages } from "../utils/cloudinaryUpload.js";
 
 /**
  * Recalculate and update the Product's average rating 
@@ -38,8 +39,21 @@ const updateProductRatingStats = async (productId) => {
  * Body: { rating, title, comment }
  */
 const createReview = asyncHandler(async (req, res) => {
-    const { rating, title, comment } = req.body;
+    console.log("createReview req.headers:", req.headers);
+    console.log("createReview req.body:", req.body);
+    console.log("createReview req.files:", req.files);
+    
+    if (!req.body) {
+        throw new AppError("Request body is completely missing or not parsed properly. Content-Type: " + req.headers['content-type'], 400);
+    }
+    
+    const body = req.body || {};
+    const { rating, title, comment } = body;
     const productId = req.params.id;
+
+    if (!rating || !comment) {
+        throw new AppError("Rating and comment are required", 400);
+    }
 
     // 1. Ensure product exists
     const product = await Product.findById(productId);
@@ -51,6 +65,12 @@ const createReview = asyncHandler(async (req, res) => {
         throw new AppError("You have already reviewed this product. You can delete or edit it from your profile.", 400);
     }
 
+    // Upload images if present
+    let photoUrls = [];
+    if (req.files && req.files.length > 0) {
+        photoUrls = await uploadImages(req.files);
+    }
+
     // 3. Create review
     const review = await Review.create({
         user: req.user._id,
@@ -58,6 +78,7 @@ const createReview = asyncHandler(async (req, res) => {
         rating: Number(rating),
         title,
         comment,
+        photos: photoUrls,
     });
 
     // 4. Update the Product's stats asynchronously

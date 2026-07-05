@@ -26,6 +26,9 @@ const reviewSchema = new mongoose.Schema({
         required: [true, "Comment is required"],
         maxLength: 1000,
     },
+    photos: [{
+        type: String,
+    }],
 }, { timestamps: true });
 
 // Prevent a user from submitting more than one review per product
