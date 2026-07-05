@@ -114,7 +114,6 @@ const getAllProducts = async (req, res) => {
 
         const products = await productModal
             .find(filter, projection)
-            .select('-galleryImages -shortDescription -material -washCare -dispatch -disclaimer -internationalNote -tags')
             .sort(sort);
 
         res.status(200).json({
