@@ -73,7 +73,8 @@ const createOrder = asyncHandler(async (req, res) => {
                     phone: shippingAddress.phone,
                     password: crypto.randomBytes(8).toString('hex')
                 });
-                await guestUser.save({ session });
+                // DO NOT pass { session } here. Implicitly creating a collection inside a transaction throws InvalidNamespace.
+                await guestUser.save();
             }
             orderUserId = guestUser._id;
         }
