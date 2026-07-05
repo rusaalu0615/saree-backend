@@ -169,9 +169,9 @@ const deleteProduct = async (req, res) => {
             product.mainImage,
             ...(product.galleryImages || []).map((img) => img.url),
         ].filter(Boolean);
-        deleteMultipleFromCloudinary(imageUrls, "image").catch(() => {});
+        deleteMultipleFromCloudinary(imageUrls, "image").catch(() => { });
         if (product.videoFile) {
-            deleteFromCloudinary(product.videoFile, "video").catch(() => {});
+            deleteFromCloudinary(product.videoFile, "video").catch(() => { });
         }
 
         res.status(200).json({
@@ -210,9 +210,9 @@ const deleteMultipleProducts = async (req, res) => {
                 product.mainImage,
                 ...(product.galleryImages || []).map((img) => img.url),
             ].filter(Boolean);
-            deleteMultipleFromCloudinary(imageUrls, "image").catch(() => {});
+            deleteMultipleFromCloudinary(imageUrls, "image").catch(() => { });
             if (product.videoFile) {
-                deleteFromCloudinary(product.videoFile, "video").catch(() => {});
+                deleteFromCloudinary(product.videoFile, "video").catch(() => { });
             }
         }
 
