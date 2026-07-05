@@ -117,7 +117,8 @@ const createOrder = asyncHandler(async (req, res) => {
             timeline: [{ status: "Order Placed", description: "Your order has been placed successfully" }],
         });
 
-        await order.save({ session });
+        // Do not pass { session } here if the collection doesn't exist yet, it throws InvalidNamespace
+        await order.save();
 
         // Commit the transaction since everything succeeded
         await session.commitTransaction();
