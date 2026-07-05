@@ -86,6 +86,12 @@ const addProduct = async (req, res) => {
         });
     } catch (error) {
         console.error(error);
+        if (error.code === 11000 && error.keyPattern && error.keyPattern.sku) {
+            return res.status(400).json({
+                success: false,
+                message: "A product with this SKU already exists. Please use a unique SKU.",
+            });
+        }
         res.status(500).json({
             success: false,
             message: "Internal server error: " + (error.message || error),
