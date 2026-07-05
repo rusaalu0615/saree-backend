@@ -1,4 +1,5 @@
 import cloudinary from "../config/cloudinary.js";
+import sharp from "sharp";
 
 /**
  * Upload a single buffer to Cloudinary using upload_stream.
@@ -24,11 +25,23 @@ function uploadBufferToCloudinary(buffer, options = {}) {
  * @returns {Promise<string>} - The secure URL of the uploaded image
  */
 export async function uploadImage(buffer, originalname = "image") {
-    const result = await uploadBufferToCloudinary(buffer, {
+    let processedBuffer = buffer;
+    
+    try {
+        // Optimize image before uploading using sharp
+        processedBuffer = await sharp(buffer)
+            .resize({ width: 1920, withoutEnlargement: true })
+            .webp({ quality: 85 })
+            .toBuffer();
+    } catch (error) {
+        console.warn(`[Sharp Error] Failed to optimize image ${originalname}:`, error.message);
+        // Fallback to original buffer if sharp fails (e.g., unsupported format)
+    }
+
+    const result = await uploadBufferToCloudinary(processedBuffer, {
         folder: "images",
         resource_type: "image",
         format: "webp",
-        quality: "auto",
     });
     return result.secure_url;
 }
