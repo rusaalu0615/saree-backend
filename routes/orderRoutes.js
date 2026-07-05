@@ -1,6 +1,6 @@
 import express from "express";
 import orderController from "../controllers/orderController.js";
-import { protect } from "../middlewares/authMiddleware.js";
+import { protect, optionalProtect } from "../middlewares/authMiddleware.js";
 
 const router = express.Router();
 
@@ -18,8 +18,8 @@ const {
 // Public route — track by orderId + email (no login needed)
 router.post("/track-public", trackOrderPublic);
 
-// Authenticated customer routes
-router.post("/", protect, createOrder);
+// Authenticated / Guest customer routes
+router.post("/", optionalProtect, createOrder);
 router.get("/my-orders", protect, getUserOrders);
 router.get("/:id", protect, getOrderById);
 router.get("/:id/track", protect, trackOrder);

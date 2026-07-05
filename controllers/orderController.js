@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 import Order from "../models/orderModal.js";
 import Product from "../models/productModal.js";
 import User from "../models/userModal.js";
@@ -55,9 +56,31 @@ const createOrder = asyncHandler(async (req, res) => {
         const discount = discountAmount || 0;
         const total = subtotal + shipping - discount;
 
+        // Determine User ID (Shadow Registration for Guests)
+        let orderUserId;
+        if (req.user) {
+            orderUserId = req.user._id;
+        } else {
+            // Guest Checkout
+            const guestEmail = shippingAddress.email.toLowerCase();
+            let guestUser = await User.findOne({ email: guestEmail });
+            
+            if (!guestUser) {
+                // Create new shadow user
+                guestUser = new User({
+                    name: `${shippingAddress.firstName} ${shippingAddress.lastName}`.trim(),
+                    email: guestEmail,
+                    phone: shippingAddress.phone,
+                    password: crypto.randomBytes(8).toString('hex')
+                });
+                await guestUser.save({ session });
+            }
+            orderUserId = guestUser._id;
+        }
+
         // Create the order
         order = new Order({
-            user: req.user._id,
+            user: orderUserId,
             items: items.map((item) => ({
                 productId: item.productId || item.id,
                 name: item.name,
@@ -106,7 +129,7 @@ const createOrder = asyncHandler(async (req, res) => {
                     { code: couponCode.toUpperCase() },
                     {
                         $inc: { usedCount: 1 },
-                        $push: { usedBy: req.user._id }
+                        $push: { usedBy: orderUserId }
                     }
                 );
             } catch (couponErr) {
@@ -116,7 +139,7 @@ const createOrder = asyncHandler(async (req, res) => {
 
         // Update user: Clear cart and save new address if not already present
         try {
-            const user = await User.findById(req.user._id);
+            const user = await User.findById(orderUserId);
             if (user) {
                 // 1. Clear cart
                 user.cart = [];

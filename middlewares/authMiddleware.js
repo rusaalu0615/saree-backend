@@ -47,4 +47,34 @@ const protect = async (req, res, next) => {
     }
 };
 
-export { protect };
+const optionalProtect = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const cookies = parseCookies(req.headers.cookie);
+
+        let token = null;
+        if (authHeader && authHeader.startsWith("Bearer ")) {
+            token = authHeader.split(" ")[1];
+        } else if (cookies.auth_token) {
+            token = cookies.auth_token;
+        }
+
+        if (!token) {
+            return next(); // No token, proceed as guest
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.id).select("-password");
+        
+        if (user) {
+            req.user = user;
+        }
+
+        next();
+    } catch (error) {
+        // If token fails validation, just ignore and treat as guest
+        next();
+    }
+};
+
+export { protect, optionalProtect };
