@@ -288,9 +288,63 @@ export const sendAdminOTPEmail = async (email, otp) => {
     }
 };
 
+/**
+ * Send Password Reset OTP Email
+ * @param {String} email - User's email address
+ * @param {String} otp - 6-digit OTP code
+ */
+export const sendPasswordResetOTPEmail = async (email, otp) => {
+    try {
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+            const msg = "[Email] Critical configuration error: EMAIL_USER or EMAIL_PASS not set";
+            console.error(msg);
+            throw new Error(msg);
+        }
+
+        const transporter = getTransporter();
+        const mailOptions = {
+            from: `"Linen Saree" <${process.env.EMAIL_USER}>`,
+            to: email,
+            subject: `Password Reset Verification Code - ${otp}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
+                    <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
+                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">LINEN SAREE</h1>
+                    </div>
+                    
+                    <div style="padding: 10px 0;">
+                        <h2 style="margin-top: 0; color: #444; font-size: 18px;">Password Reset Request</h2>
+                        <p style="line-height: 1.5; color: #555;">We received a request to reset your password. Use the verification code below to proceed.</p>
+                        
+                        <div style="background-color: #fcfbfa; border: 1px dashed #c4a77d; border-radius: 6px; padding: 20px; text-align: center; margin: 25px 0;">
+                            <span style="font-family: monospace; font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #8B7355;">${otp}</span>
+                        </div>
+                        
+                        <p style="font-size: 13px; color: #666; line-height: 1.5; background-color: #f7f7f7; padding: 10px; border-radius: 4px;">
+                            <strong>Security Notice:</strong> This code is valid for exactly <strong>5 minutes</strong> and can only be used once. If you did not request a password reset, please ignore this email or contact support.
+                        </p>
+                    </div>
+                    
+                    <div style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px; text-align: center; font-size: 11px; color: #999;">
+                        &copy; ${new Date().getFullYear()} Linen Saree E-Commerce. All rights reserved.
+                    </div>
+                </div>
+            `,
+        };
+
+        const info = await transporter.sendMail(mailOptions);
+        console.log(`[Email] Password Reset OTP sent successfully to ${email}: ${info.messageId}`);
+        return true;
+    } catch (err) {
+        console.error("[Email Error] Failed to send password reset OTP email:", err.message);
+        throw err;
+    }
+};
+
 export default {
     sendOrderConfirmationEmail,
     verifyEmailConfig,
     sendShippingUpdateEmail,
     sendAdminOTPEmail,
+    sendPasswordResetOTPEmail,
 };
