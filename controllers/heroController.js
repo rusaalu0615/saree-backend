@@ -1,4 +1,5 @@
 import Hero from "../models/heroModal.js";
+import { uploadImage } from "../utils/cloudinaryUpload.js";
 
 // Fetch the Hero data
 export const getHero = async (req, res) => {
@@ -40,13 +41,16 @@ export const addHeroSlide = async (req, res) => {
             hero = new Hero({ slides: [] });
         }
 
+        // Upload image to Cloudinary
+        const imageUrl = await uploadImage(image.buffer, image.originalname);
+
         hero.slides.push({
             title,
             subtitle,
             description,
             category,
             link,
-            image: image.path // Cloudinary URL from multer
+            image: imageUrl
         });
 
         await hero.save();
