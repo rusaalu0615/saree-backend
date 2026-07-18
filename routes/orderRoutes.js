@@ -13,6 +13,7 @@ const {
     getAllOrders,
     updateOrderStatus,
     cancelOrder,
+    verifyPayment,
 } = orderController;
 
 // Public route — track by orderId + email (no login needed)
@@ -20,6 +21,7 @@ router.post("/track-public", trackOrderPublic);
 
 // Authenticated / Guest customer routes
 router.post("/", optionalProtect, createOrder);
+router.post("/verify-payment", optionalProtect, verifyPayment);
 router.get("/my-orders", protect, getUserOrders);
 router.get("/:id", protect, getOrderById);
 router.get("/:id/track", protect, trackOrder);

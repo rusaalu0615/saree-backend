@@ -58,6 +58,9 @@ const orderSchema = new mongoose.Schema({
             default: "pending",
         },
         transactionId: String,
+        razorpayOrderId: String,
+        razorpayPaymentId: String,
+        razorpaySignature: String,
     },
     pricing: {
         subtotal: { type: Number, required: true },

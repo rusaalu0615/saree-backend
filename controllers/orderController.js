@@ -9,6 +9,7 @@ import emailService from "../services/emailService.js";
 import invoiceService from "../services/invoiceService.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import razorpayInstance from "../config/razorpay.js";
 
 // ============================================================
 // CUSTOMER ENDPOINTS
@@ -20,6 +21,7 @@ import asyncHandler from "../utils/asyncHandler.js";
  */
 const createOrder = asyncHandler(async (req, res) => {
     const { items, shippingAddress, paymentMethod, couponCode, discount: discountAmount } = req.body;
+    console.log("[createOrder] Received req.body.paymentMethod:", paymentMethod);
 
     if (!items || items.length === 0) {
         throw new AppError("Order must contain at least one item", 400);
@@ -181,7 +183,43 @@ const createOrder = asyncHandler(async (req, res) => {
         throw error;
     }
 
-    // Push to Shiprocket (async — don't block the response)
+    if (order.payment.method !== "cod") {
+        if (!razorpayInstance) {
+            throw new AppError("Payment gateway is not configured.", 500);
+        }
+
+        try {
+            const options = {
+                amount: Math.round(order.pricing.total * 100), // amount in smallest currency unit (paise)
+                currency: "INR",
+                receipt: order.orderId,
+            };
+            const rzpOrder = await razorpayInstance.orders.create(options);
+
+            order.payment.razorpayOrderId = rzpOrder.id;
+            await order.save();
+
+            res.status(201).json({
+                success: true,
+                order: {
+                    orderId: order.orderId,
+                    _id: order._id,
+                    status: order.status,
+                    total: order.pricing.total,
+                    razorpayOrderId: rzpOrder.id,
+                    currency: rzpOrder.currency,
+                    amount: rzpOrder.amount,
+                    key: process.env.RAZORPAY_KEY_ID, // Send key back so frontend knows it (or frontend uses env)
+                },
+            });
+            return;
+        } catch (rzpErr) {
+            console.error("Razorpay order creation failed:", rzpErr);
+            throw new AppError("Failed to initiate payment. Please try again.", 500);
+        }
+    }
+
+    // COD Flow: Push to Shiprocket (async — don't block the response)
     pushToShiprocket(order).catch((err) =>
         console.error(`Shiprocket push failed for order ${order.orderId}:`, err.message)
     );
@@ -208,6 +246,48 @@ const createOrder = asyncHandler(async (req, res) => {
             total: order.pricing.total,
         },
     });
+});
+
+/**
+ * POST /api/order/verify-payment — Verify Razorpay Payment
+ */
+const verifyPayment = asyncHandler(async (req, res) => {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+
+    const order = await Order.findOne({ orderId });
+    if (!order) throw new AppError("Order not found", 404);
+
+    const generatedSignature = crypto
+        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .update(razorpay_order_id + "|" + razorpay_payment_id)
+        .digest("hex");
+
+    if (generatedSignature !== razorpay_signature) {
+        order.payment.status = "failed";
+        await order.save();
+        throw new AppError("Payment verification failed", 400);
+    }
+
+    order.payment.status = "paid";
+    order.payment.razorpayPaymentId = razorpay_payment_id;
+    order.payment.razorpaySignature = razorpay_signature;
+    order.timeline.push({
+        status: "Payment Successful",
+        description: `Payment verified via Razorpay`,
+    });
+    
+    await order.save();
+
+    // Now push to shiprocket and send email
+    pushToShiprocket(order).catch((err) =>
+        console.error(`Shiprocket push failed for order ${order.orderId}:`, err.message)
+    );
+
+    invoiceService.generateInvoicePDF(order)
+        .then((pdfBuffer) => emailService.sendOrderConfirmationEmail(order, pdfBuffer))
+        .catch((err) => console.error(`[Checkout Error] Email confirmation sequence failed for ${order.orderId}:`, err));
+
+    res.status(200).json({ success: true, message: "Payment verified successfully" });
 });
 
 /**
@@ -495,4 +575,5 @@ export default {
     getAllOrders,
     updateOrderStatus,
     cancelOrder,
+    verifyPayment,
 };
