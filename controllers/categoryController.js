@@ -1,4 +1,5 @@
 import categoriesModal from "../models/categoriesModal.js";
+import { uploadImage, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
 
 /**
  * GET /api/category/allcategory
@@ -35,10 +36,12 @@ const addCategory = async (req, res) => {
             });
         }
 
+        const imageUrl = await uploadImage(image.buffer, image.originalname);
+
         const category = await categoriesModal.create({
             name: name.trim(),
             sortDesc: sortDesc.trim(),
-            image: image.path, // Cloudinary URL
+            image: imageUrl, // Cloudinary URL
         });
 
         res.status(201).json({
@@ -76,7 +79,23 @@ const updateCategory = async (req, res) => {
         const updateData = {};
         if (name) updateData.name = name.trim();
         if (sortDesc) updateData.sortDesc = sortDesc.trim();
-        if (imageFile) updateData.image = imageFile.path;
+
+        if (imageFile) {
+            const categoryToUpdate = await categoriesModal.findById(id);
+            if (!categoryToUpdate) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Category not found",
+                });
+            }
+
+            const imageUrl = await uploadImage(imageFile.buffer, imageFile.originalname);
+            updateData.image = imageUrl;
+
+            if (categoryToUpdate.image) {
+                await deleteFromCloudinary(categoryToUpdate.image);
+            }
+        }
 
         const category = await categoriesModal.findByIdAndUpdate(id, updateData, { new: true });
         if (!category) {
@@ -112,6 +131,10 @@ const deleteCategory = async (req, res) => {
                 success: false,
                 message: "Category not found",
             });
+        }
+
+        if (category.image) {
+            await deleteFromCloudinary(category.image);
         }
         res.status(200).json({
             success: true,
