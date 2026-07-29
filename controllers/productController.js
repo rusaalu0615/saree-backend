@@ -136,7 +136,6 @@ const getAllProducts = async (req, res) => {
             // Include only what's needed for ProductCards
             Object.assign(projection, {
                 shortDescription: 0,
-                galleryImages: 0,
                 details: 0,
                 sareeSize: 0,
                 blouseSize: 0,
