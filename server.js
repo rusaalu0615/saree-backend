@@ -18,7 +18,11 @@ const app = express()
 const allowedOrigins = [
     "https://linen-saree.vercel.app",
     "http://localhost:3000",
-    "https://www.linen-saree.vercel.app"
+    "https://www.linen-saree.vercel.app",
+    "https://handloomer.com/",
+    "https://www.handloomer.com/",
+    "http://handloomer.com/",
+    "http://www.handloomer.com/",
 ];
 
 // Dynamic origin CORS support allowing credentials
@@ -26,10 +30,10 @@ app.use(cors({
     origin: (origin, callback) => {
         // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
-        
+
         // Allow local network IPs for mobile testing during development
         if (
-            origin.startsWith("http://localhost:") || 
+            origin.startsWith("http://localhost:") ||
             origin.startsWith("http://127.0.0.1:") ||
             origin.startsWith("http://192.168.") ||
             origin.startsWith("http://10.") ||
