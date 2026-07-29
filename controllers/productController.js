@@ -101,30 +101,99 @@ const addProduct = async (req, res) => {
 
 const getAllProducts = async (req, res) => {
     try {
-        const { search, q, category } = req.query;
+        const { 
+            search, q, category, color, material, 
+            priceMin, priceMax, isOnSale, isFestive, isNewArrival,
+            sortBy, page, limit, fullData 
+        } = req.query;
+
         const searchQuery = search || q;
-
         const filter = {};
-        const projection = {};
-        let sort = { createdAt: -1 };
-
+        
+        // 1. Text Search
         if (searchQuery) {
             filter.$text = { $search: searchQuery };
-            projection.score = { $meta: "textScore" };
+        }
+
+        // 2. Exact Match Filters
+        if (category) filter.category = category;
+        if (color) filter.color = color;
+        if (material) filter.material = material;
+        if (isOnSale !== undefined) filter.isOnSale = isOnSale === "true";
+        if (isFestive !== undefined) filter.isFestive = isFestive === "true";
+        if (isNewArrival !== undefined) filter.isNewArrival = isNewArrival === "true";
+
+        // 3. Price Range Filter
+        if (priceMin || priceMax) {
+            filter.price = {};
+            if (priceMin) filter.price.$gte = Number(priceMin);
+            if (priceMax) filter.price.$lte = Number(priceMax);
+        }
+
+        // 4. Projection (Exclude heavy fields for lists unless fullData is true)
+        const projection = searchQuery ? { score: { $meta: "textScore" } } : {};
+        if (fullData !== "true") {
+            // Include only what's needed for ProductCards
+            Object.assign(projection, {
+                shortDescription: 0,
+                galleryImages: 0,
+                details: 0,
+                sareeSize: 0,
+                blouseSize: 0,
+                washCare: 0,
+                dispatch: 0,
+                disclaimer: 0,
+                internationalNote: 0,
+            });
+        }
+
+        // 5. Sorting
+        let sort = {};
+        if (searchQuery && !sortBy) {
             sort = { score: { $meta: "textScore" } };
+        } else {
+            switch (sortBy) {
+                case 'price-low':
+                    sort.price = 1; break;
+                case 'price-high':
+                    sort.price = -1; break;
+                case 'newest':
+                    sort.createdAt = -1; break;
+                case 'name-asc':
+                    sort.name = 1; break;
+                case 'name-desc':
+                    sort.name = -1; break;
+                default:
+                    sort.createdAt = -1; // Default sort
+            }
         }
 
-        if (category) {
-            filter.category = category;
+        // 6. Pagination
+        // Default to no pagination if limit is not provided (for backward compatibility until frontend refactor)
+        const isPaginated = limit !== undefined;
+        const pageNum = parseInt(page) || 1;
+        const limitNum = parseInt(limit) || 0;
+        const skipNum = (pageNum - 1) * limitNum;
+
+        const query = productModal.find(filter, projection).sort(sort);
+        if (isPaginated) {
+            query.skip(skipNum).limit(limitNum);
         }
 
-        const products = await productModal
-            .find(filter, projection)
-            .sort(sort);
+        const [products, totalProducts] = await Promise.all([
+            query,
+            isPaginated ? productModal.countDocuments(filter) : Promise.resolve(0)
+        ]);
 
         res.status(200).json({
             success: true,
             products,
+            pagination: isPaginated ? {
+                currentPage: pageNum,
+                totalPages: Math.ceil(totalProducts / limitNum),
+                totalProducts,
+                limit: limitNum
+            } : null
         });
     } catch (error) {
         console.error(error);
