@@ -325,12 +325,12 @@ async function pushToShiprocket(order) {
                 }
             }
 
-            // Generate pickup
-            try {
-                await shiprocket.generatePickup(srResult.shipment_id);
-            } catch (pickupErr) {
-                console.error("Pickup generation failed:", pickupErr.message);
-            }
+            // Generate pickup (COMMENTED OUT FOR SAFE TESTING)
+            // try {
+            //     await shiprocket.generatePickup(srResult.shipment_id);
+            // } catch (pickupErr) {
+            //     console.error("Pickup generation failed:", pickupErr.message);
+            // }
 
             await order.save();
         }
