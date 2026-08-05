@@ -4,12 +4,13 @@ import upLoadImage from "../middlewares/uploadImage.js";
 import upLoadVideo from "../middlewares/uploadVideo.js";
 import { adminProtect } from "../middlewares/adminMiddleware.js";
 
-const { addProduct, getAllProducts, getProductById, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct } = productController;
+const { addProduct, getAllProducts, getProductById, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters } = productController;
 
 const router = express.Router();
 
 // Public routes
 router.get("/allproducts", getAllProducts);
+router.get("/filters", getFilters);
 router.get("/:id", getProductById);
 
 // Protected Admin routes (require whitelisted Admin token)

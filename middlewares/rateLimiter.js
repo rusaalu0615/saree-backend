@@ -1,10 +1,10 @@
 import rateLimit from "express-rate-limit";
 
-// Global limiter: 100 requests per 15 minutes for general routes
+// Global limiter: 5000 requests per 15 minutes for general routes (increased for development)
 export const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 150,
-    limit: 150, // compatible with v6 and v7
+    max: 5000,
+    limit: 5000, // compatible with v6 and v7
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: {

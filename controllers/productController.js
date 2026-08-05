@@ -116,9 +116,22 @@ const getAllProducts = async (req, res) => {
         }
 
         // 2. Exact Match Filters
-        if (category) filter.category = category;
-        if (color) filter.color = color;
-        if (material) filter.material = material;
+        if (category) {
+            const categoriesList = category.split(',').map(c => c.trim());
+            const regexList = categoriesList.map(c => {
+                const pattern = c.replace(/-/g, "[\\s\\-]*");
+                return new RegExp(`^${pattern}$`, "i");
+            });
+            filter.category = { $in: regexList };
+        }
+        if (color) {
+            const colorList = color.split(',').map(c => new RegExp(`^${c.trim().replace(/-/g, "[\\s\\-]*")}$`, "i"));
+            filter.color = { $in: colorList };
+        }
+        if (material) {
+            const materialList = material.split(',').map(c => new RegExp(`^${c.trim().replace(/-/g, "[\\s\\-]*")}$`, "i"));
+            filter.material = { $in: materialList };
+        }
         if (isOnSale !== undefined) filter.isOnSale = isOnSale === "true";
         if (isFestive !== undefined) filter.isFestive = isFestive === "true";
         if (isNewArrival !== undefined) filter.isNewArrival = isNewArrival === "true";
@@ -580,4 +593,18 @@ const quickUpdateProduct = async (req, res) => {
     }
 };
 
-export default { addProduct, getAllProducts, getProductById, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct };
+const getFilters = async (req, res) => {
+    try {
+        const colors = await productModal.distinct("color");
+        const materials = await productModal.distinct("material");
+        res.status(200).json({
+            success: true,
+            colors: colors.filter(Boolean),
+            materials: materials.filter(Boolean)
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+export default { addProduct, getAllProducts, getProductById, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters };
