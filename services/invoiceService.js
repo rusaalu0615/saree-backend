@@ -21,10 +21,10 @@ export const generateInvoicePDF = (order) => {
             // --- HEADER ---
             doc.fillColor("#444444")
                 .fontSize(20)
-                .text("Ms Handloom", 50, 50, { align: "left" }) // Brand Name
+                .text("MS HANDLOOM", 50, 50, { align: "left" }) // Brand Name
                 .fontSize(10)
-                .text("www.mshandloom.com", { align: "left" })
-                .text("support@mshandloom.com", { align: "left" });
+                .text("www.mshandloomer.com", { align: "left" })
+                .text("mshandloom7@gmail.com", { align: "left" });
 
             doc.fontSize(20)
                 .text("INVOICE", 0, 50, { align: "right" })
