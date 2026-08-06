@@ -187,7 +187,7 @@ const getAllProducts = async (req, res) => {
         const limitNum = parseInt(limit) || 0;
         const skipNum = (pageNum - 1) * limitNum;
 
-        const query = productModal.find(filter, projection).sort(sort);
+        const query = productModal.find(filter, projection).sort(sort).lean();
         if (isPaginated) {
             query.skip(skipNum).limit(limitNum);
         }
@@ -219,7 +219,30 @@ const getAllProducts = async (req, res) => {
 const getProductById = async (req, res) => {
     try {
         const { id } = req.params;
-        const product = await productModal.findById(id);
+        const product = await productModal.findById(id).lean();
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found",
+            });
+        }
+        res.status(200).json({
+            success: true,
+            product,
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    }
+};
+
+const getProductBySku = async (req, res) => {
+    try {
+        const { sku } = req.params;
+        const product = await productModal.findOne({ sku }).lean();
         if (!product) {
             return res.status(404).json({
                 success: false,
@@ -607,4 +630,4 @@ const getFilters = async (req, res) => {
     }
 };
 
-export default { addProduct, getAllProducts, getProductById, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters };
+export default { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters };

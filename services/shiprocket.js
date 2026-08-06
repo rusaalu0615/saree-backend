@@ -26,6 +26,9 @@ async function getToken() {
     const email = process.env.SHIPROCKET_EMAIL;
     const password = process.env.SHIPROCKET_PASSWORD;
 
+    console.log('SR_EMAIL:', JSON.stringify(process.env.SHIPROCKET_EMAIL));
+    console.log('SR_PASS len:', process.env.SHIPROCKET_PASSWORD?.length);
+
     if (!email || !password) {
         throw new Error("Shiprocket credentials not configured. Set SHIPROCKET_EMAIL and SHIPROCKET_PASSWORD in .env");
     }

@@ -3,6 +3,7 @@ import express from "express";
 import connectDB from "./config/db.js";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import compression from "compression";
 import indexRoutes from "./routes/index.js";
 import categoryBannerRoutes from "./routes/categoryBannerRoutes.js";
 import { globalLimiter } from "./middlewares/rateLimiter.js";
@@ -14,6 +15,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+app.use(compression());
 
 const allowedOrigins = [
     "http://localhost:3000",
