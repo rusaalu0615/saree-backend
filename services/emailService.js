@@ -68,7 +68,7 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                     <div style="text-align: center; padding: 20px 0;">
-                        <h1 style="color: #8B7355; margin: 0;">Ms Handloom</h1>
+                        <h1 style="color: #8B7355; margin: 0;">MS HANDLOOM</h1>
                     </div>
                     
                     <div style="padding: 20px; background-color: #f9f9f9; border-radius: 5px;">
@@ -199,7 +199,7 @@ export const sendShippingUpdateEmail = async (order, status) => {
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                     <div style="text-align: center; padding: 20px 0;">
-                        <h1 style="color: #8B7355; margin: 0;">Ms Handloom</h1>
+                        <h1 style="color: #8B7355; margin: 0;">MS HANDLOOM</h1>
                     </div>
                     
                     <div style="padding: 20px; background-color: #f9f9f9; border-radius: 5px;">
@@ -255,7 +255,7 @@ export const sendAdminOTPEmail = async (email, otp) => {
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
-                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">Ms Handloom</h1>
+                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">MS HANDLOOM</h1>
                         <p style="margin: 5px 0 0 0; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; color: #888;">Administrative Control Center</p>
                     </div>
                     
@@ -309,7 +309,7 @@ export const sendPasswordResetOTPEmail = async (email, otp) => {
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
-                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">Ms Handloom</h1>
+                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">MS HANDLOOM</h1>
                     </div>
                     
                     <div style="padding: 10px 0;">
