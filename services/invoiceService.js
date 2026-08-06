@@ -21,10 +21,10 @@ export const generateInvoicePDF = (order) => {
             // --- HEADER ---
             doc.fillColor("#444444")
                 .fontSize(20)
-                .text("LINEN SAREE", 50, 50, { align: "left" }) // Brand Name
+                .text("Ms Handloom", 50, 50, { align: "left" }) // Brand Name
                 .fontSize(10)
-                .text("www.linensaree.com", { align: "left" })
-                .text("support@linensaree.com", { align: "left" });
+                .text("www.mshandloom.com", { align: "left" })
+                .text("support@mshandloom.com", { align: "left" });
 
             doc.fontSize(20)
                 .text("INVOICE", 0, 50, { align: "right" })
@@ -101,7 +101,7 @@ export const generateInvoicePDF = (order) => {
             // --- FOOTER ---
             doc.font("Helvetica").fontSize(10);
             doc.text(
-                "Thank you for shopping with Linen Saree!",
+                "Thank you for shopping with Ms Handloom!",
                 50,
                 700,
                 { align: "center", width: 500 }

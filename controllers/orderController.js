@@ -81,18 +81,25 @@ const createOrder = asyncHandler(async (req, res) => {
             orderUserId = guestUser._id;
         }
 
+        // Fetch products from DB to guarantee correct SKU for Shiprocket
+        const productIds = items.map(item => item.productId || item.id);
+        const dbProducts = await Product.find({ _id: { $in: productIds } });
+
         // Create the order
         order = new Order({
             user: orderUserId,
-            items: items.map((item) => ({
-                productId: item.productId || item.id,
-                name: item.name,
-                slug: item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
-                price: item.price,
-                quantity: item.quantity,
-                image: item.image || "",
-                sku: item.sku || "",
-            })),
+            items: items.map((item) => {
+                const dbProduct = dbProducts.find(p => p._id.toString() === (item.productId || item.id).toString());
+                return {
+                    productId: item.productId || item.id,
+                    name: item.name,
+                    slug: item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
+                    price: item.price,
+                    quantity: item.quantity,
+                    image: item.image || "",
+                    sku: dbProduct ? (dbProduct.sku || item.sku || "") : (item.sku || ""),
+                };
+            }),
             shippingAddress: {
                 firstName: shippingAddress.firstName,
                 lastName: shippingAddress.lastName,
@@ -231,7 +238,10 @@ const createOrder = asyncHandler(async (req, res) => {
             console.log(`[Checkout] Invoice PDF generated for ${order.orderId}, passing to email service`);
             return emailService.sendOrderConfirmationEmail(order, pdfBuffer);
         })
-        .then(() => console.log(`[Checkout] Confirmation email process completed for ${order.orderId}`))
+        .then(() => {
+            console.log(`[Checkout] Confirmation email process completed for ${order.orderId}`);
+            return emailService.sendAdminOrderNotificationEmail(order);
+        })
         .catch((err) => {
             console.error(`[Checkout Error] Email confirmation sequence failed for ${order.orderId}:`);
             console.dir(err);
@@ -285,6 +295,7 @@ const verifyPayment = asyncHandler(async (req, res) => {
 
     invoiceService.generateInvoicePDF(order)
         .then((pdfBuffer) => emailService.sendOrderConfirmationEmail(order, pdfBuffer))
+        .then(() => emailService.sendAdminOrderNotificationEmail(order))
         .catch((err) => console.error(`[Checkout Error] Email confirmation sequence failed for ${order.orderId}:`, err));
 
     res.status(200).json({ success: true, message: "Payment verified successfully" });

@@ -241,8 +241,8 @@ const getProductById = async (req, res) => {
 
 const getProductBySku = async (req, res) => {
     try {
-        const { sku } = req.params;
-        const product = await productModal.findOne({ sku }).lean();
+        const sku = decodeURIComponent(req.params.sku);
+        const product = await productModal.findOne({ sku: { $regex: new RegExp(`^${sku}$`, 'i') } }).lean();
         if (!product) {
             return res.status(404).json({
                 success: false,

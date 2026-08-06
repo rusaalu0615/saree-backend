@@ -62,13 +62,13 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
             .join("");
 
         const mailOptions = {
-            from: `"Linen Saree" <${process.env.EMAIL_USER}>`,
+            from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
             to: order.shippingAddress.email,
             subject: `Order Confirmation - ${order.orderId}`,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                     <div style="text-align: center; padding: 20px 0;">
-                        <h1 style="color: #8B7355; margin: 0;">LINEN SAREE</h1>
+                        <h1 style="color: #8B7355; margin: 0;">Ms Handloom</h1>
                     </div>
                     
                     <div style="padding: 20px; background-color: #f9f9f9; border-radius: 5px;">
@@ -193,13 +193,13 @@ export const sendShippingUpdateEmail = async (order, status) => {
         }
 
         const mailOptions = {
-            from: `"Linen Saree" <${process.env.EMAIL_USER}>`,
+            from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
             to: order.shippingAddress.email,
             subject: subject,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                     <div style="text-align: center; padding: 20px 0;">
-                        <h1 style="color: #8B7355; margin: 0;">LINEN SAREE</h1>
+                        <h1 style="color: #8B7355; margin: 0;">Ms Handloom</h1>
                     </div>
                     
                     <div style="padding: 20px; background-color: #f9f9f9; border-radius: 5px;">
@@ -249,13 +249,13 @@ export const sendAdminOTPEmail = async (email, otp) => {
 
         const transporter = getTransporter();
         const mailOptions = {
-            from: `"Linen Saree Admin" <${process.env.EMAIL_USER}>`,
+            from: `"Ms Handloom Admin" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: `Admin Verification OTP - ${otp}`,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
-                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">LINEN SAREE</h1>
+                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">Ms Handloom</h1>
                         <p style="margin: 5px 0 0 0; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; color: #888;">Administrative Control Center</p>
                     </div>
                     
@@ -273,7 +273,7 @@ export const sendAdminOTPEmail = async (email, otp) => {
                     </div>
                     
                     <div style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px; text-align: center; font-size: 11px; color: #999;">
-                        &copy; ${new Date().getFullYear()} Linen Saree E-Commerce. All rights reserved.
+                        &copy; ${new Date().getFullYear()} Ms Handloom E-Commerce. All rights reserved.
                     </div>
                 </div>
             `,
@@ -303,13 +303,13 @@ export const sendPasswordResetOTPEmail = async (email, otp) => {
 
         const transporter = getTransporter();
         const mailOptions = {
-            from: `"Linen Saree" <${process.env.EMAIL_USER}>`,
+            from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: `Password Reset Verification Code - ${otp}`,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
-                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">LINEN SAREE</h1>
+                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">Ms Handloom</h1>
                     </div>
                     
                     <div style="padding: 10px 0;">
@@ -326,7 +326,7 @@ export const sendPasswordResetOTPEmail = async (email, otp) => {
                     </div>
                     
                     <div style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px; text-align: center; font-size: 11px; color: #999;">
-                        &copy; ${new Date().getFullYear()} Linen Saree E-Commerce. All rights reserved.
+                        &copy; ${new Date().getFullYear()} Ms Handloom E-Commerce. All rights reserved.
                     </div>
                 </div>
             `,
@@ -341,10 +341,72 @@ export const sendPasswordResetOTPEmail = async (email, otp) => {
     }
 };
 
+/**
+ * Send New Order Notification to Admin
+ * @param {Object} order - The DB order object
+ */
+export const sendAdminOrderNotificationEmail = async (order) => {
+    try {
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) return false;
+        
+        // Use ADMIN_EMAILS if configured, otherwise fallback to EMAIL_USER
+        const adminEmails = process.env.ADMIN_EMAILS || process.env.EMAIL_USER;
+        if (!adminEmails) return false;
+
+        const transporter = getTransporter();
+        
+        const itemsList = order.items.map(i => `<li>${i.quantity}x ${i.name} (SKU: ${i.sku || 'N/A'}) - ${formatCurrency(i.price * i.quantity)}</li>`).join('');
+
+        const mailOptions = {
+            from: `"Ms Handloom System" <${process.env.EMAIL_USER}>`,
+            to: adminEmails,
+            subject: `🎉 NEW ORDER: ${order.orderId} - ${formatCurrency(order.pricing.total)}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px;">
+                    <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
+                        <h1 style="color: #28a745; margin: 0; font-size: 24px;">New Order Received!</h1>
+                    </div>
+                    
+                    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+                        <tr><td style="padding: 5px 0;"><strong>Order ID:</strong></td><td>${order.orderId}</td></tr>
+                        <tr><td style="padding: 5px 0;"><strong>Customer:</strong></td><td>${order.shippingAddress.firstName} ${order.shippingAddress.lastName}</td></tr>
+                        <tr><td style="padding: 5px 0;"><strong>Email:</strong></td><td>${order.shippingAddress.email}</td></tr>
+                        <tr><td style="padding: 5px 0;"><strong>Phone:</strong></td><td>${order.shippingAddress.phone}</td></tr>
+                        <tr><td style="padding: 5px 0;"><strong>Payment:</strong></td><td><span style="background: #e9ecef; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: bold;">${order.payment.method.toUpperCase()}</span></td></tr>
+                        <tr><td style="padding: 5px 0;"><strong>Total Value:</strong></td><td style="color: #28a745; font-weight: bold; font-size: 16px;">${formatCurrency(order.pricing.total)}</td></tr>
+                    </table>
+                    
+                    <h3 style="border-bottom: 1px solid #ddd; padding-bottom: 5px;">Items Ordered</h3>
+                    <ul style="padding-left: 20px; line-height: 1.6;">
+                        ${itemsList}
+                    </ul>
+                    
+                    <div style="margin-top: 25px; padding: 15px; background: #f9f9f9; border-left: 4px solid #8B7355; border-radius: 4px;">
+                        <h4 style="margin-top: 0; margin-bottom: 10px; color: #555;">Shipping Destination:</h4>
+                        <p style="margin:0; font-size: 14px; line-height: 1.5;">
+                        ${order.shippingAddress.address}<br>
+                        ${order.shippingAddress.landmark ? order.shippingAddress.landmark + '<br>' : ''}
+                        ${order.shippingAddress.city}, ${order.shippingAddress.state} - <strong>${order.shippingAddress.pincode}</strong>
+                        </p>
+                    </div>
+                </div>
+            `,
+        };
+
+        const info = await transporter.sendMail(mailOptions);
+        console.log(`[Email] Admin notification sent successfully: ${info.messageId}`);
+        return true;
+    } catch (err) {
+        console.error("[Email Error] Failed to send admin order notification:", err.message);
+        return false;
+    }
+};
+
 export default {
     sendOrderConfirmationEmail,
     verifyEmailConfig,
     sendShippingUpdateEmail,
     sendAdminOTPEmail,
     sendPasswordResetOTPEmail,
+    sendAdminOrderNotificationEmail,
 };
