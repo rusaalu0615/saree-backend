@@ -137,7 +137,6 @@ productSchema.index({ category: 1 });
 productSchema.index({ price: 1 });
 productSchema.index({ color: 1 });
 productSchema.index({ material: 1 });
-productSchema.index({ sku: 1 });
 productSchema.index({ isOnSale: 1 });
 productSchema.index({ isFestive: 1 });
 productSchema.index({ isNewArrival: 1 });

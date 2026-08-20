@@ -60,11 +60,8 @@ app.use(
                 return callback(null, true);
             }
 
-            console.log("Blocked Origin:", origin);
-
-            return callback(
-                new Error(`Not allowed by CORS: ${origin}`)
-            );
+            console.warn("Blocked Origin by CORS:", origin);
+            return callback(null, false);
         },
 
         credentials: true,
