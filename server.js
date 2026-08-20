@@ -25,6 +25,9 @@ const allowedOrigins = [
 
     "https://handloomer.com",
     "https://www.handloomer.com",
+
+    "https://linensaree.in",
+    "https://www.linensaree.in",
 ];
 
 // CORS Configuration
@@ -60,8 +63,11 @@ app.use(
                 return callback(null, true);
             }
 
-            console.warn("Blocked Origin by CORS:", origin);
-            return callback(null, false);
+            console.log("Blocked Origin:", origin);
+
+            return callback(
+                new Error(`Not allowed by CORS: ${origin}`)
+            );
         },
 
         credentials: true,
@@ -97,6 +103,19 @@ app.use("/api", globalLimiter);
 
 // Serve uploads folder
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Health Check & Root Route
+app.get("/", (req, res) => {
+    res.json({
+        success: true,
+        message: "Linen Saree Backend API is live & running!",
+        timestamp: new Date().toISOString(),
+    });
+});
+
+app.get("/health", (req, res) => {
+    res.json({ status: "healthy", uptime: process.uptime() });
+});
 
 // Routes
 app.use("/api", indexRoutes);
