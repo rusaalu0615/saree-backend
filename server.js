@@ -28,6 +28,9 @@ const allowedOrigins = [
 
     "https://linensaree.in",
     "https://www.linensaree.in",
+
+    "https://sareeghar.com",
+    "https://www.sareeghar.com",
 ];
 
 // CORS Configuration
