@@ -16,6 +16,9 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
+// Trust reverse proxy (Nginx) for accurate IP resolution in rate-limiting
+app.set("trust proxy", 1);
+
 app.use(compression());
 
 const allowedOrigins = [
