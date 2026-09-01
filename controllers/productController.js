@@ -20,7 +20,7 @@ const addProduct = async (req, res) => {
 
         const files = req.files;
 
-        // ── Validate BEFORE uploading to Cloudinary ──
+        // ── Validate BEFORE uploading to R2 ──
         if (
             !name || !sku || !category || !price || !regularPrice || !stock ||
             !shortDescription || !tags || !color || !material || !sareeSize ||
@@ -32,7 +32,7 @@ const addProduct = async (req, res) => {
             });
         }
 
-        // ── Upload all files to Cloudinary IN PARALLEL ──
+        // ── Upload all files to R2 IN PARALLEL ──
         const [mainImageUrl, galleryUrls, videoFileUrl] = await Promise.all([
             // Main image
             uploadImage(files.mainImage[0].buffer, files.mainImage[0].originalname),

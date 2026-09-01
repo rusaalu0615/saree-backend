@@ -41,7 +41,7 @@ const addCategory = async (req, res) => {
         const category = await categoriesModal.create({
             name: name.trim(),
             sortDesc: sortDesc.trim(),
-            image: imageUrl, // Cloudinary URL
+            image: imageUrl, // R2 URL
         });
 
         res.status(201).json({

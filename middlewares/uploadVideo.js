@@ -1,7 +1,7 @@
 import multer from "multer";
 
-// Use memory storage — video buffers are uploaded to Cloudinary
-// from the controller via utils/cloudinaryUpload.js
+// Use memory storage — video buffers are uploaded to Cloudflare R2
+// from the controller via utils/r2Upload.js
 const memoryStorage = multer.memoryStorage();
 
 const upLoadVideo = multer({ storage: memoryStorage });
