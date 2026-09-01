@@ -1,5 +1,5 @@
 import categoriesModal from "../models/categoriesModal.js";
-import { uploadImage, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
+import { uploadImage, deleteFromR2 } from "../utils/r2Upload.js";
 
 /**
  * GET /api/category/allcategory
@@ -93,7 +93,7 @@ const updateCategory = async (req, res) => {
             updateData.image = imageUrl;
 
             if (categoryToUpdate.image) {
-                await deleteFromCloudinary(categoryToUpdate.image);
+                await deleteFromR2(categoryToUpdate.image);
             }
         }
 
@@ -134,7 +134,7 @@ const deleteCategory = async (req, res) => {
         }
 
         if (category.image) {
-            await deleteFromCloudinary(category.image);
+            await deleteFromR2(category.image);
         }
         res.status(200).json({
             success: true,

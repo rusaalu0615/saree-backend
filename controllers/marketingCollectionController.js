@@ -1,4 +1,5 @@
 import MarketingCollection from "../models/marketingCollectionModal.js";
+import { uploadImage } from "../utils/r2Upload.js";
 
 // @desc    Get all marketing collections
 // @route   GET /api/marketing-collections
@@ -83,7 +84,7 @@ export const updateMarketingCollection = async (req, res) => {
 
         // Handle image if uploaded
         if (req.file) {
-            updateData.image = req.file.path;
+            updateData.image = await uploadImage(req.file.buffer, req.file.originalname);
         }
 
         const collection = await MarketingCollection.findOneAndUpdate(

@@ -1,4 +1,5 @@
 import CategoryBanner from "../models/categoryBannerModal.js";
+import { uploadImage } from "../utils/r2Upload.js";
 
 // Get banner by slug
 export const getCategoryBannerBySlug = async (req, res) => {
@@ -48,8 +49,11 @@ export const upsertCategoryBanner = async (req, res) => {
     try {
         const { slug, title, subtitle, description, buttonText, link } = req.body;
         
-        // Handle image path from Cloudinary upload or existing body data
-        const imagePath = req.file ? req.file.path : req.body.image;
+        // Handle image upload to R2 or existing body URL
+        let imagePath = req.body.image;
+        if (req.file) {
+            imagePath = await uploadImage(req.file.buffer, req.file.originalname);
+        }
 
         if (!slug || !title || !imagePath) {
             return res.status(400).json({

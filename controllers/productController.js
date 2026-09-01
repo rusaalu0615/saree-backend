@@ -1,12 +1,11 @@
 import productModal from "../models/productModal.js";
-import cloudinary from "../config/cloudinary.js";
 import {
     uploadImage,
     uploadImages,
     uploadVideo,
-    deleteFromCloudinary,
-    deleteMultipleFromCloudinary,
-} from "../utils/cloudinaryUpload.js";
+    deleteFromR2,
+    deleteMultipleFromR2,
+} from "../utils/r2Upload.js";
 
 const addProduct = async (req, res) => {
     try {
@@ -273,14 +272,14 @@ const deleteProduct = async (req, res) => {
             });
         }
 
-        // ── Cleanup Cloudinary assets ──
+        // ── Cleanup R2 assets ──
         const imageUrls = [
             product.mainImage,
             ...(product.galleryImages || []).map((img) => img.url),
         ].filter(Boolean);
-        deleteMultipleFromCloudinary(imageUrls, "image").catch(() => { });
+        deleteMultipleFromR2(imageUrls).catch(() => { });
         if (product.videoFile) {
-            deleteFromCloudinary(product.videoFile, "video").catch(() => { });
+            deleteFromR2(product.videoFile).catch(() => { });
         }
 
         res.status(200).json({
@@ -313,15 +312,15 @@ const deleteMultipleProducts = async (req, res) => {
 
         const result = await productModal.deleteMany({ _id: { $in: ids } });
 
-        // ── Cleanup Cloudinary assets in background ──
+        // ── Cleanup R2 assets in background ──
         for (const product of productsToDelete) {
             const imageUrls = [
                 product.mainImage,
                 ...(product.galleryImages || []).map((img) => img.url),
             ].filter(Boolean);
-            deleteMultipleFromCloudinary(imageUrls, "image").catch(() => { });
+            deleteMultipleFromR2(imageUrls).catch(() => { });
             if (product.videoFile) {
-                deleteFromCloudinary(product.videoFile, "video").catch(() => { });
+                deleteFromR2(product.videoFile).catch(() => { });
             }
         }
 

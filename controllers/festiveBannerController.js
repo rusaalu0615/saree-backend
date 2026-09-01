@@ -1,4 +1,5 @@
 import FestiveBanner from "../models/festiveBannerModal.js";
+import { uploadImage } from "../utils/r2Upload.js";
 
 // Fetch Festive Banner data
 export const getFestiveBanner = async (req, res) => {
@@ -45,7 +46,7 @@ export const updateFestiveBanner = async (req, res) => {
 
         // Update image if provided
         if (imageFile) {
-            festiveBanner.image = imageFile.path; // Cloudinary URL
+            festiveBanner.image = await uploadImage(imageFile.buffer, imageFile.originalname);
         }
 
         await festiveBanner.save();

@@ -1,4 +1,5 @@
 import blogModal from "../models/blogModal.js";
+import { uploadImage, deleteFromR2 } from "../utils/r2Upload.js";
 
 const addBlog = async (req, res) => {
     try {
@@ -6,7 +7,10 @@ const addBlog = async (req, res) => {
         const imageFile = req.file;
 
         // The image can either come as a file (preferred) or as a URL (fallback for legacy)
-        const image = imageFile ? imageFile.path : req.body.image;
+        let image = req.body.image;
+        if (imageFile) {
+            image = await uploadImage(imageFile.buffer, imageFile.originalname);
+        }
 
         if (!title || !description || !image) {
             return res.status(400).json({
@@ -65,6 +69,10 @@ const deleteBlog = async (req, res) => {
             });
         }
 
+        if (blog.image) {
+            deleteFromR2(blog.image).catch(() => {});
+        }
+
         res.status(200).json({
             success: true,
             message: "Blog post removed successfully",
@@ -90,7 +98,7 @@ const updateBlog = async (req, res) => {
         
         // Handle image update from file OR body URL
         if (imageFile) {
-            updateData.image = imageFile.path;
+            updateData.image = await uploadImage(imageFile.buffer, imageFile.originalname);
         } else if (req.body.image) {
             updateData.image = req.body.image;
         }

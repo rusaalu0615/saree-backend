@@ -1,4 +1,5 @@
 import FestiveSale from "../models/festiveSaleModal.js";
+import { uploadImage } from "../utils/r2Upload.js";
 
 // Fetch Festive Sale data
 export const getFestiveSale = async (req, res) => {
@@ -45,7 +46,7 @@ export const updateFestiveSale = async (req, res) => {
 
         // Update image if provided
         if (imageFile) {
-            festiveSale.image = imageFile.path; // Cloudinary URL
+            festiveSale.image = await uploadImage(imageFile.buffer, imageFile.originalname);
         }
 
         await festiveSale.save();

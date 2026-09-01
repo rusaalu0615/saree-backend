@@ -1,4 +1,5 @@
 import CelebrityBanner from "../models/celebrityBannerModal.js";
+import { uploadImage } from "../utils/r2Upload.js";
 
 // @desc    Get Celebrity Collection Banner
 // @route   GET /api/celebrity-collection
@@ -31,7 +32,7 @@ export const upsertCelebrityBanner = async (req, res) => {
         
         // Handle image if uploaded via multer
         if (req.file) {
-            updateData.image = req.file.path;
+            updateData.image = await uploadImage(req.file.buffer, req.file.originalname);
         }
 
         const banner = await CelebrityBanner.findOneAndUpdate({}, updateData, {

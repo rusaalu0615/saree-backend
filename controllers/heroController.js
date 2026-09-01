@@ -1,5 +1,5 @@
 import Hero from "../models/heroModal.js";
-import { uploadImage } from "../utils/cloudinaryUpload.js";
+import { uploadImage, deleteFromR2 } from "../utils/r2Upload.js";
 
 // Fetch the Hero data
 export const getHero = async (req, res) => {
@@ -41,7 +41,7 @@ export const addHeroSlide = async (req, res) => {
             hero = new Hero({ slides: [] });
         }
 
-        // Upload image to Cloudinary
+        // Upload image to Cloudflare R2
         const imageUrl = await uploadImage(image.buffer, image.originalname);
 
         hero.slides.push({
@@ -79,6 +79,11 @@ export const deleteHeroSlide = async (req, res) => {
             return res.status(404).json({ success: false, message: "Hero document not found" });
         }
 
+        const slideToDelete = hero.slides.find(slide => slide._id.toString() === slideId);
+        if (slideToDelete?.image) {
+            deleteFromR2(slideToDelete.image).catch(() => {});
+        }
+
         hero.slides = hero.slides.filter(slide => slide._id.toString() !== slideId);
         await hero.save();
 
@@ -95,3 +100,4 @@ export const deleteHeroSlide = async (req, res) => {
         });
     }
 };
+

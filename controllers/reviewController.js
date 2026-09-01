@@ -2,7 +2,7 @@ import Review from "../models/reviewModal.js";
 import Product from "../models/productModal.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
-import { uploadImages } from "../utils/cloudinaryUpload.js";
+import { uploadImages, deleteMultipleFromR2 } from "../utils/r2Upload.js";
 
 /**
  * Recalculate and update the Product's average rating 
@@ -136,6 +136,11 @@ const deleteReview = asyncHandler(async (req, res) => {
     if (review.user.toString() !== req.user._id.toString()) {
         // Warning: Normally we check req.user.role === 'admin' here as well.
         throw new AppError("You are not authorized to delete this review", 403);
+    }
+
+    // Clean up photos from R2
+    if (review.photos && review.photos.length > 0) {
+        deleteMultipleFromR2(review.photos).catch(() => {});
     }
 
     const productId = review.product;
