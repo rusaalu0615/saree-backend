@@ -438,49 +438,134 @@ const trackOrder = asyncHandler(async (req, res) => {
 });
 
 /**
- * POST /api/order/track-public — Track by orderId + email (no auth required)
+ * POST /api/order/track-public — Pure Shiprocket & Order tracking (AWB or Order ID)
  */
 const trackOrderPublic = asyncHandler(async (req, res) => {
-    const { orderId, email } = req.body;
+    const { orderId, email, awb } = req.body;
 
-    if (!orderId || !email) {
-        throw new AppError("Order ID and email are required", 400);
+    // Case 1: Direct AWB Tracking
+    if (awb && typeof awb === "string" && awb.trim()) {
+        const cleanAwb = awb.trim();
+        let tracking = null;
+        let trackingError = null;
+
+        try {
+            tracking = await shiprocket.trackByAWB(cleanAwb);
+        } catch (err) {
+            console.error("Direct AWB tracking error:", err.message);
+            trackingError = err.message;
+        }
+
+        // Try to find the associated order in our DB if it exists
+        const matchedOrder = await Order.findOne({ "shiprocket.awbCode": cleanAwb }).lean();
+
+        if (!tracking && !matchedOrder) {
+            throw new AppError("No shipment found for the provided AWB / Tracking number.", 404);
+        }
+
+        return res.status(200).json({
+            success: true,
+            trackType: "awb",
+            awb: cleanAwb,
+            order: matchedOrder ? {
+                orderId: matchedOrder.orderId,
+                status: matchedOrder.status,
+                items: matchedOrder.items,
+                pricing: matchedOrder.pricing,
+                shippingAddress: {
+                    city: matchedOrder.shippingAddress?.city,
+                    state: matchedOrder.shippingAddress?.state,
+                    pincode: matchedOrder.shippingAddress?.pincode,
+                },
+                shiprocket: matchedOrder.shiprocket,
+                timeline: matchedOrder.timeline,
+                createdAt: matchedOrder.createdAt,
+            } : null,
+            tracking,
+            trackingError,
+        });
     }
 
-    const order = await Order.findOne({
-        orderId: orderId.toUpperCase(),
-        "shippingAddress.email": email.toLowerCase(),
-    });
+    // Case 2: Order ID (with optional Email) Tracking
+    if (!orderId) {
+        throw new AppError("Please provide an Order ID or AWB Tracking Number.", 400);
+    }
+
+    const cleanOrderId = orderId.trim();
+    const query = {
+        $or: [
+            { orderId: new RegExp(`^${cleanOrderId}$`, "i") },
+            { "shiprocket.awbCode": cleanOrderId },
+        ]
+    };
+
+    // If email provided, verify it
+    if (email && typeof email === "string" && email.trim()) {
+        query["shippingAddress.email"] = new RegExp(`^${email.trim()}$`, "i");
+    }
+
+    const order = await Order.findOne(query).lean();
 
     if (!order) {
-        throw new AppError("Order not found. Please check your Order ID and email.", 404);
+        // If not found in DB, check if cleanOrderId itself is an AWB in Shiprocket
+        try {
+            const tracking = await shiprocket.trackByAWB(cleanOrderId);
+            if (tracking) {
+                return res.status(200).json({
+                    success: true,
+                    trackType: "awb",
+                    awb: cleanOrderId,
+                    order: null,
+                    tracking,
+                });
+            }
+        } catch (e) {
+            // Ignore fallback error
+        }
+
+        throw new AppError(
+            email ? "No order found matching this Order ID and Email." : "No order found with this ID.",
+            404
+        );
     }
 
     let tracking = null;
 
-    if (order.shiprocket.awbCode) {
+    if (order.shiprocket?.awbCode) {
         try {
             tracking = await shiprocket.trackByAWB(order.shiprocket.awbCode);
         } catch (err) {
             console.error("Public AWB tracking failed:", err.message);
         }
+    } else if (order.shiprocket?.orderId) {
+        try {
+            tracking = await shiprocket.trackByShiprocketOrderId(order.shiprocket.orderId);
+        } catch (err) {
+            console.error("Public Shiprocket Order ID tracking failed:", err.message);
+        }
     }
 
     res.status(200).json({
         success: true,
+        trackType: "order",
         order: {
             orderId: order.orderId,
             status: order.status,
             items: order.items,
             pricing: order.pricing,
+            shippingAddress: {
+                city: order.shippingAddress?.city,
+                state: order.shippingAddress?.state,
+                pincode: order.shippingAddress?.pincode,
+            },
             shiprocket: {
-                courierName: order.shiprocket.courierName,
-                awbCode: order.shiprocket.awbCode,
-                trackingUrl: order.shiprocket.trackingUrl,
-                status: order.shiprocket.status,
+                courierName: order.shiprocket?.courierName,
+                awbCode: order.shiprocket?.awbCode,
+                trackingUrl: order.shiprocket?.trackingUrl || (order.shiprocket?.awbCode ? `https://shiprocket.co/tracking/${order.shiprocket.awbCode}` : null),
+                status: order.shiprocket?.status,
             },
             timeline: order.timeline,
-            estimatedDelivery: null, // Shiprocket tracking data has this
+            createdAt: order.createdAt,
         },
         tracking,
     });
