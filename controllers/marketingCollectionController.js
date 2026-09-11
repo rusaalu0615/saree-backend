@@ -12,6 +12,16 @@ export const getMarketingCollections = async (req, res) => {
         if (collections.length === 0) {
             const defaults = [
                 {
+                    key: "new-arrivals",
+                    name: "New Arrivals",
+                    title1: "Just",
+                    title2: "Dropped",
+                    description: "Explore our latest handcrafted linen saree arrivals, woven with love and modern charm.",
+                    buttonText: "SHOP NEW ARRIVALS",
+                    link: "/collections/new-arrivals",
+                    image: "/images/celebrity-look.jpg"
+                },
+                {
                     key: "festive",
                     name: "Festive Collection",
                     title1: "Experience",
@@ -119,13 +129,55 @@ export const updateMarketingCollection = async (req, res) => {
 export const getCollectionByKey = async (req, res) => {
     try {
         const { key } = req.params;
-        const collection = await MarketingCollection.findOne({ key });
+        let collection = await MarketingCollection.findOne({ key });
         
         if (!collection) {
-            return res.status(404).json({
-                success: false,
-                message: "Collection not found"
-            });
+            const defaultCollections = {
+                "new-arrivals": {
+                    key: "new-arrivals",
+                    name: "New Arrivals",
+                    title1: "Just",
+                    title2: "Dropped",
+                    description: "Explore our latest handcrafted linen saree arrivals, woven with love and modern charm.",
+                    buttonText: "SHOP NEW ARRIVALS",
+                    link: "/collections/new-arrivals",
+                    image: "/images/celebrity-look.jpg"
+                },
+                "festive": {
+                    key: "festive",
+                    name: "Festive Collection",
+                    title1: "Experience",
+                    title2: "Festive Collection",
+                    description: "Discover our latest curated festive sarees, handcrafted with elegance and tradition.",
+                    buttonText: "SHOP COLLECTION",
+                    link: "/collections/festive",
+                    image: "/images/bridal-saree.jpg"
+                },
+                "big-sale": {
+                    key: "big-sale",
+                    name: "Big Sale Collection",
+                    title1: "festive",
+                    title2: "BIG SALE",
+                    offer: "UP TO 60% OFF",
+                    description: "Limited time offer on premium linen sarees - Don't miss out on these incredible deals!",
+                    buttonText: "SHOP SALE NOW",
+                    link: "/collections/offers",
+                    image: "/images/designer-saree.jpg"
+                }
+            };
+
+            if (defaultCollections[key]) {
+                try {
+                    collection = await MarketingCollection.create(defaultCollections[key]);
+                } catch (e) {
+                    collection = defaultCollections[key];
+                }
+            } else {
+                return res.status(404).json({
+                    success: false,
+                    message: "Collection not found"
+                });
+            }
         }
 
         res.status(200).json({

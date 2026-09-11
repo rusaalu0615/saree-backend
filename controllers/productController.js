@@ -103,6 +103,7 @@ const getAllProducts = async (req, res) => {
         const { 
             search, q, category, color, material, 
             priceMin, priceMax, isOnSale, isFestive, isNewArrival,
+            productCollection, collection,
             sortBy, page, limit, fullData 
         } = req.query;
 
@@ -131,8 +132,36 @@ const getAllProducts = async (req, res) => {
             const materialList = material.split(',').map(c => new RegExp(`^${c.trim().replace(/-/g, "[\\s\\-]*")}$`, "i"));
             filter.material = { $in: materialList };
         }
-        if (isOnSale !== undefined) filter.isOnSale = isOnSale === "true";
-        if (isFestive !== undefined) filter.isFestive = isFestive === "true";
+
+        const targetCollection = productCollection || collection;
+        if (targetCollection) {
+            if (targetCollection === "festive") {
+                filter.$or = [{ isFestive: true }, { productCollection: "festive" }];
+            } else if (targetCollection === "big-sale" || targetCollection === "sale") {
+                filter.$or = [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }];
+            } else {
+                filter.productCollection = targetCollection;
+            }
+        }
+
+        if (isOnSale !== undefined) {
+            if (isOnSale === "true") {
+                filter.$or = filter.$or || [];
+                filter.$or.push({ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" });
+            } else {
+                filter.isOnSale = false;
+            }
+        }
+
+        if (isFestive !== undefined) {
+            if (isFestive === "true") {
+                filter.$or = filter.$or || [];
+                filter.$or.push({ isFestive: true }, { productCollection: "festive" });
+            } else {
+                filter.isFestive = false;
+            }
+        }
+
         if (isNewArrival !== undefined) filter.isNewArrival = isNewArrival === "true";
 
         // 3. Price Range Filter
