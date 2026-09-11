@@ -114,7 +114,7 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.get("/", (req, res) => {
     res.json({
         success: true,
-        message: "Linen Saree Backend API is live & running!",
+        message: "Handloomer Backend API is live & running!",
         timestamp: new Date().toISOString(),
     });
 });
