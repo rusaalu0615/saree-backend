@@ -54,16 +54,19 @@ export async function uploadBufferToR2(buffer, key, contentType, cacheControl = 
  * @param {string} [originalname="image"] - Original filename
  * @returns {Promise<string>} - Public URL
  */
-export async function uploadImage(buffer, originalname = "image") {
+export async function uploadImage(buffer, originalname = "image", options = {}) {
     let processedBuffer = buffer;
     let contentType = "image/webp";
     let ext = ".webp";
 
+    const width = options.width || 1600;
+    const quality = options.quality || 80;
+
     try {
         // Optimize image to high-efficiency WebP with sharp
         processedBuffer = await sharp(buffer)
-            .resize({ width: 1920, withoutEnlargement: true })
-            .webp({ quality: 85 })
+            .resize({ width, withoutEnlargement: true })
+            .webp({ quality })
             .toBuffer();
     } catch (error) {
         console.warn(`[Sharp Error] Failed to optimize image ${originalname}:`, error.message);

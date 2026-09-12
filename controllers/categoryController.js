@@ -36,7 +36,7 @@ const addCategory = async (req, res) => {
             });
         }
 
-        const imageUrl = await uploadImage(image.buffer, image.originalname);
+        const imageUrl = await uploadImage(image.buffer, image.originalname, { width: 800, quality: 80 });
 
         const category = await categoriesModal.create({
             name: name.trim(),
@@ -89,7 +89,7 @@ const updateCategory = async (req, res) => {
                 });
             }
 
-            const imageUrl = await uploadImage(imageFile.buffer, imageFile.originalname);
+            const imageUrl = await uploadImage(imageFile.buffer, imageFile.originalname, { width: 800, quality: 80 });
             updateData.image = imageUrl;
 
             if (categoryToUpdate.image) {
