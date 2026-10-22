@@ -28,13 +28,14 @@ export const sendAdminOTP = asyncHandler(async (req, res) => {
     const whitelist = getWhitelistedEmails();
     const isWhitelisted = whitelist.includes(sanitizedEmail);
 
-    // To prevent user enumeration attacks, if the email is not whitelisted,
-    // we return a success response, but do NOT send or generate an OTP.
+    // Reject non-whitelisted emails with an explicit error.
+    // NOTE: This intentionally reveals whether an email is authorized (no enumeration protection)
+    // so that legitimate admins get clear feedback when they use the wrong email.
     if (!isWhitelisted) {
         console.log(`[Admin Auth] Access request for non-whitelisted email: ${sanitizedEmail}`);
-        return res.status(200).json({
-            success: true,
-            message: "If the email is authorized, an OTP has been sent."
+        return res.status(403).json({
+            success: false,
+            message: "This email is not authorized for admin access. Please use an approved admin email."
         });
     }
 
