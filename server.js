@@ -7,6 +7,7 @@ import compression from "compression";
 import indexRoutes from "./routes/index.js";
 import categoryBannerRoutes from "./routes/categoryBannerRoutes.js";
 import { globalLimiter } from "./middlewares/rateLimiter.js";
+import AppError from "./utils/AppError.js";
 
 import path from "path";
 import { fileURLToPath } from "url";
@@ -15,6 +16,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+const isProduction = process.env.NODE_ENV === "production";
 
 // Trust reverse proxy (Nginx) for accurate IP resolution in rate-limiting
 app.set("trust proxy", 1);
@@ -48,15 +51,18 @@ app.use(
                 return callback(null, true);
             }
 
-            // Allow localhost and local network during development
-            if (
-                origin.startsWith("http://localhost:") ||
-                origin.startsWith("http://127.0.0.1:") ||
-                origin.startsWith("http://192.168.") ||
-                origin.startsWith("http://10.") ||
-                origin.startsWith("http://172.")
-            ) {
-                return callback(null, true);
+            // Allow localhost and local network during development ONLY.
+            // In production these wildcards are a credential-theft surface.
+            if (!isProduction) {
+                if (
+                    origin.startsWith("http://localhost:") ||
+                    origin.startsWith("http://127.0.0.1:") ||
+                    origin.startsWith("http://192.168.") ||
+                    origin.startsWith("http://10.") ||
+                    origin.startsWith("http://172.")
+                ) {
+                    return callback(null, true);
+                }
             }
 
             // Allow configured origins
@@ -64,8 +70,8 @@ app.use(
                 return callback(null, true);
             }
 
-            // Allow all Vercel preview deployments
-            if (origin.endsWith(".vercel.app")) {
+            // Allow Vercel preview deployments during development only
+            if (!isProduction && origin.endsWith(".vercel.app")) {
                 return callback(null, true);
             }
 
@@ -131,9 +137,16 @@ app.use("/api/category-banner", categoryBannerRoutes);
 app.use((err, req, res, next) => {
     console.error("[Global Error Handler]:", err);
 
+    // Never leak internal error details (driver paths, validation internals) in production
+    const isOperational = err instanceof AppError || err.statusCode;
+    const message =
+        !isProduction || isOperational
+            ? err.message || "Internal server error"
+            : "Something went wrong. Please try again.";
+
     res.status(err.statusCode || 500).json({
         success: false,
-        message: err.message || "Internal server error",
+        message,
     });
 });
 

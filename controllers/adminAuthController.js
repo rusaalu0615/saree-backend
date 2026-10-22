@@ -52,7 +52,7 @@ export const sendAdminOTP = asyncHandler(async (req, res) => {
     }
 
     // Generate cryptographically secure 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
 
     // Hash OTP before storing to prevent exposure in case of DB read breach
     const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
@@ -147,11 +147,14 @@ export const verifyAdminOTP = asyncHandler(async (req, res) => {
     // Sign session
     const token = generateToken(user._id);
 
-    // Set secure, HttpOnly, SameSite=None cookie for XSS protection
+    // Set secure, HttpOnly cookie for XSS protection.
+    // Secure + SameSite=None is only viable over HTTPS, so fall back to an
+    // HTTP-friendly cookie during local development (http://localhost).
+    const isProduction = process.env.NODE_ENV === "production";
     res.cookie("auth_token", token, {
         httpOnly: true,
-        secure: true,
-        sameSite: "none",
+        secure: isProduction,
+        sameSite: isProduction ? "none" : "lax",
         maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 

@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs"
 import asyncHandler from "../utils/asyncHandler.js"
 import OTP from "../models/otpModel.js"
 import emailService from "../services/emailService.js"
+import crypto from "crypto"
 
 const registerUser = asyncHandler(async (req, res) => {
     const { name, email, phone, password } = req.body;
@@ -101,8 +102,8 @@ const forgotPassword = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: "No user found with this email" });
     }
 
-    // Generate 6-digit OTP
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    // Generate 6-digit OTP (cryptographically secure)
+    const otpCode = crypto.randomInt(100000, 1000000).toString();
 
     // Delete any existing OTP for this email
     await OTP.deleteMany({ email: sanitizedEmail });

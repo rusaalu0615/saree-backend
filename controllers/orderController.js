@@ -20,7 +20,7 @@ import razorpayInstance from "../config/razorpay.js";
  * Body: { items, shippingAddress, paymentMethod, couponCode, discount }
  */
 const createOrder = asyncHandler(async (req, res) => {
-    const { items, shippingAddress, paymentMethod, couponCode, discount: discountAmount } = req.body;
+    const { items, shippingAddress, paymentMethod, couponCode } = req.body;
     console.log("[createOrder] Received req.body.paymentMethod:", paymentMethod);
 
     if (!items || items.length === 0) {
@@ -28,6 +28,21 @@ const createOrder = asyncHandler(async (req, res) => {
     }
     if (!shippingAddress) {
         throw new AppError("Shipping address is required", 400);
+    }
+
+    // Fetch products from DB — source of truth for price/name/sku (never trust client prices)
+    const productIds = items.map(item => item.productId || item.id);
+    const dbProducts = await Product.find({ _id: { $in: productIds } });
+    const priceMap = new Map(dbProducts.map(p => [p._id.toString(), p]));
+
+    for (const item of items) {
+        const pid = (item.productId || item.id || "").toString();
+        if (!priceMap.has(pid)) {
+            throw new AppError("One or more items in your cart are no longer available. Please review your cart.", 400);
+        }
+        if (!Number.isInteger(item.quantity) || item.quantity < 1) {
+            throw new AppError("Invalid item quantity", 400);
+        }
     }
 
     // Prepare a bulk write operation for checking and deducting stock
@@ -52,11 +67,12 @@ const createOrder = asyncHandler(async (req, res) => {
             throw new AppError("One or more items in your cart are out of stock. Please review your cart.", 400);
         }
 
-        // Calculate pricing
-        const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+        // Calculate pricing entirely from DB prices
+        const subtotal = items.reduce((sum, item) => {
+            const dbProduct = priceMap.get((item.productId || item.id).toString());
+            return sum + dbProduct.price * item.quantity;
+        }, 0);
         const shipping = subtotal >= 999 ? 0 : 199;
-        const discount = discountAmount || 0;
-        const total = subtotal + shipping - discount;
 
         // Determine User ID (Shadow Registration for Guests)
         let orderUserId;
@@ -81,23 +97,42 @@ const createOrder = asyncHandler(async (req, res) => {
             orderUserId = guestUser._id;
         }
 
-        // Fetch products from DB to guarantee correct SKU for Shiprocket
-        const productIds = items.map(item => item.productId || item.id);
-        const dbProducts = await Product.find({ _id: { $in: productIds } });
+        // Validate coupon server-side — discount is NEVER taken from the client
+        let discount = 0;
+        let appliedCouponCode = "";
+        if (couponCode) {
+            const coupon = await Coupon.findOne({ code: couponCode.toUpperCase() });
+            if (!coupon || !coupon.isValid()) {
+                throw new AppError("Coupon is invalid or has expired.", 400);
+            }
+            if (subtotal < coupon.minPurchase) {
+                throw new AppError(`Minimum purchase of \u20b9${coupon.minPurchase} required for this coupon.`, 400);
+            }
+            const usedByUser = coupon.usedBy.filter(
+                uid => uid.toString() === orderUserId.toString()
+            ).length;
+            if (usedByUser >= coupon.usageLimitPerUser) {
+                throw new AppError("You have already used this coupon.", 400);
+            }
+            discount = coupon.calculateDiscount(subtotal);
+            appliedCouponCode = coupon.code;
+        }
+
+        const total = Math.max(subtotal + shipping - discount, 0);
 
         // Create the order
         order = new Order({
             user: orderUserId,
             items: items.map((item) => {
-                const dbProduct = dbProducts.find(p => p._id.toString() === (item.productId || item.id).toString());
+                const dbProduct = priceMap.get((item.productId || item.id).toString());
                 return {
-                    productId: item.productId || item.id,
-                    name: item.name,
-                    slug: item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
-                    price: item.price,
+                    productId: dbProduct._id,
+                    name: dbProduct.name,
+                    slug: dbProduct.slug || item.slug || dbProduct.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
+                    price: dbProduct.price,
                     quantity: item.quantity,
-                    image: item.image || "",
-                    sku: dbProduct ? (dbProduct.sku || item.sku || "") : (item.sku || ""),
+                    image: item.image || dbProduct.image || "",
+                    sku: dbProduct.sku || item.sku || "",
                 };
             }),
             shippingAddress: {
@@ -119,7 +154,7 @@ const createOrder = asyncHandler(async (req, res) => {
                 subtotal,
                 shipping,
                 discount,
-                couponCode: couponCode || "",
+                couponCode: appliedCouponCode,
                 total,
             },
             status: "placed",

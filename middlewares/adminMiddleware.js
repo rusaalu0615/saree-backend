@@ -45,23 +45,13 @@ const adminProtect = async (req, res, next) => {
             return res.status(401).json({ message: "Administrative account not found." });
         }
 
-        // 4. Assert user role is strictly admin
-        // We also check whitelist to guarantee high security in case role is manually mutated
-        const whitelistedEmails = (process.env.ADMIN_EMAILS || "")
-            .split(",")
-            .map(e => e.trim().toLowerCase())
-            .filter(Boolean);
-
-        const isWhitelisted = whitelistedEmails.includes(user.email.toLowerCase());
-
-        if (user.role !== "admin" && !isWhitelisted) {
+        // 4. Assert user role is strictly admin — verified against the DB only.
+        // The ADMIN_EMAILS whitelist is NOT consulted here: otherwise any existing
+        // user's 1-day JWT would instantly escalate to admin if their email was
+        // later whitelisted. Whitelisting only takes effect at OTP login time
+        // (verifyAdminOTP provisions/upgrades the role in the DB).
+        if (user.role !== "admin") {
             return res.status(403).json({ message: "Access denied. Administrative privileges required." });
-        }
-
-        // Upgrade user to admin if whitelisted but not set in DB
-        if (user.role !== "admin" && isWhitelisted) {
-            user.role = "admin";
-            await user.save();
         }
 
         // 5. Attach user to request

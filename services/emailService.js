@@ -251,7 +251,7 @@ export const sendAdminOTPEmail = async (email, otp) => {
         const mailOptions = {
             from: `"Ms Handloom Admin" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: `Admin Verification OTP - ${otp}`,
+            subject: `Admin Verification Code — Ms Handloom`,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
@@ -305,7 +305,7 @@ export const sendPasswordResetOTPEmail = async (email, otp) => {
         const mailOptions = {
             from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: `Password Reset Verification Code - ${otp}`,
+            subject: `Password Reset Verification Code — Ms Handloom`,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
