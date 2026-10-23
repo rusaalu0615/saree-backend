@@ -11,14 +11,7 @@ import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import razorpayInstance from "../config/razorpay.js";
 
-// ============================================================
-// CUSTOMER ENDPOINTS
-// ============================================================
 
-/**
- * POST /api/order — Place a new order
- * Body: { items, shippingAddress, paymentMethod, couponCode, discount }
- */
 const createOrder = asyncHandler(async (req, res) => {
     const { items, shippingAddress, paymentMethod, couponCode } = req.body;
     console.log("[createOrder] Received req.body.paymentMethod:", paymentMethod);
@@ -642,17 +635,17 @@ const trackOrderPublic = asyncHandler(async (req, res) => {
             success: true,
             trackType: "awb",
             awb: cleanAwb,
+            // Shipping status only — an AWB alone must NOT expose line items,
+            // pricing or the destination address (those require Order ID + email).
             order: matchedOrder ? {
                 orderId: matchedOrder.orderId,
                 status: matchedOrder.status,
-                items: matchedOrder.items,
-                pricing: matchedOrder.pricing,
-                shippingAddress: {
-                    city: matchedOrder.shippingAddress?.city,
-                    state: matchedOrder.shippingAddress?.state,
-                    pincode: matchedOrder.shippingAddress?.pincode,
+                shiprocket: {
+                    courierName: matchedOrder.shiprocket?.courierName,
+                    awbCode: matchedOrder.shiprocket?.awbCode,
+                    trackingUrl: matchedOrder.shiprocket?.trackingUrl || (matchedOrder.shiprocket?.awbCode ? `https://shiprocket.co/tracking/${matchedOrder.shiprocket.awbCode}` : null),
+                    status: matchedOrder.shiprocket?.status,
                 },
-                shiprocket: matchedOrder.shiprocket,
                 timeline: matchedOrder.timeline,
                 createdAt: matchedOrder.createdAt,
             } : null,
@@ -789,6 +782,16 @@ const getAllOrders = asyncHandler(async (req, res) => {
  */
 const updateOrderStatus = asyncHandler(async (req, res) => {
     const { status, description } = req.body;
+
+    // Guard: status must be a valid enum value, otherwise an admin typo stores an
+    // invalid state that breaks UI filters — and a missing one crashes on charAt.
+    const VALID_STATUSES = [
+        "placed", "confirmed", "processing", "shipped",
+        "in_transit", "out_for_delivery", "delivered", "cancelled", "returned",
+    ];
+    if (typeof status !== "string" || !VALID_STATUSES.includes(status)) {
+        throw new AppError(`Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}`, 400);
+    }
 
     const order = await Order.findById(req.params.id);
     if (!order) throw new AppError("Order not found", 404);

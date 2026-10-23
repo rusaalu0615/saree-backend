@@ -8,6 +8,7 @@ import compression from "compression";
 import indexRoutes from "./routes/index.js";
 import categoryBannerRoutes from "./routes/categoryBannerRoutes.js";
 import { globalLimiter } from "./middlewares/rateLimiter.js";
+import { csrfGuard } from "./middlewares/csrfGuard.js";
 import AppError from "./utils/AppError.js";
 
 import path from "path";
@@ -121,6 +122,10 @@ app.use((req, res, next) => {
 
 // Apply global rate limiter
 app.use("/api", globalLimiter);
+
+// CSRF guard: require the custom X-Requested-With header on state-changing
+// requests (cookie auth is SameSite=None). Razorpay webhook is exempted inside.
+app.use("/api", csrfGuard);
 
 // Serve uploads folder
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));

@@ -29,16 +29,30 @@ const protect = async (req, res, next) => {
         }
 
         // 2. Verify token (Synchronous, throws error if invalid)
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
 
         // 3. Find user and attach to request object
-        const user = await User.findById(decoded.id).select("-password");
+        const user = await User.findById(decoded.id).select("-password +revokedTokens");
         if (!user) {
             return res.status(401).json({ message: "Not authorized, user not found" });
         }
+
+        // 4. Reject explicitly revoked sessions (logged-out tokens).
+        if (decoded.jti && Array.isArray(user.revokedTokens) &&
+            user.revokedTokens.some(t => t.jti === decoded.jti)) {
+            return res.status(401).json({ message: "Session expired. Please log in again." });
+        }
+
+        // 5. Reject tokens issued before the password was last changed, so a
+        //    reset/password change invalidates every previously active session.
+        if (user.passwordChangedAt &&
+            user.passwordChangedAt.getTime() / 1000 > decoded.iat) {
+            return res.status(401).json({ message: "Session expired. Please log in again." });
+        }
+
         req.user = user;
 
-        // 4. Move to the next middleware/controller
+        // 6. Move to the next middleware/controller
         next();
 
     } catch (error) {
@@ -63,10 +77,16 @@ const optionalProtect = async (req, res, next) => {
             return next(); // No token, proceed as guest
         }
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findById(decoded.id).select("-password");
-        
-        if (user) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
+        const user = await User.findById(decoded.id).select("-password +revokedTokens");
+
+        // Treat a revoked or stale session as a guest.
+        const revoked = decoded.jti && Array.isArray(user?.revokedTokens) &&
+            user.revokedTokens.some(t => t.jti === decoded.jti);
+        const stale = user && user.passwordChangedAt &&
+            user.passwordChangedAt.getTime() / 1000 > decoded.iat;
+
+        if (user && !revoked && !stale) {
             req.user = user;
         }
 

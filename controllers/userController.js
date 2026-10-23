@@ -5,6 +5,57 @@ import asyncHandler from "../utils/asyncHandler.js"
 import OTP from "../models/otpModel.js"
 import emailService from "../services/emailService.js"
 import crypto from "crypto"
+import jwt from "jsonwebtoken"
+
+const MIN_PASSWORD_LENGTH = 8;
+const MAX_OTP_ATTEMPTS = 3;
+
+// Constant-time compare of two equal-length hex strings (sha256 digests).
+const safeHexCompare = (a, b) => {
+    if (typeof a !== "string" || typeof b !== "string") return false;
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+};
+
+const hashOtp = (otp) => crypto.createHash("sha256").update(otp).digest("hex");
+
+// Verify a 6-digit reset OTP the same way the admin flow does: latest record
+// per email, hashed comparison, and a hard attempt cap. Non-destructive on
+// success so resetPassword can re-check it and then delete every OTP for the
+// email. Guards against brute-forcing the code (the IP limiter alone allowed
+// ~15 guesses) and against plaintext OTP leaking on a DB read breach.
+const checkResetOtp = async (sanitizedEmail, otp) => {
+    const record = await OTP.findOne({ email: sanitizedEmail }).sort({ createdAt: -1 });
+    if (!record) return { ok: false, reason: "expired" };
+
+    record.attempts += 1;
+    await record.save();
+
+    if (record.attempts > MAX_OTP_ATTEMPTS) {
+        await OTP.deleteMany({ email: sanitizedEmail });
+        return { ok: false, reason: "locked" };
+    }
+
+    if (!safeHexCompare(record.otp, hashOtp(otp))) {
+        return { ok: false, reason: "invalid" };
+    }
+    return { ok: true, record };
+};
+
+// Extract the auth token from the Authorization header or the auth_token
+// cookie (same precedence as the auth middlewares).
+const readToken = (req) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) return authHeader.split(" ")[1];
+    const cookie = req.headers.cookie;
+    if (cookie) {
+        const match = cookie.split(";").map(c => c.trim()).find(c => c.startsWith("auth_token="));
+        if (match) return decodeURIComponent(match.split("=").slice(1).join("="));
+    }
+    return null;
+};
 
 const registerUser = asyncHandler(async (req, res) => {
     const { name, email, phone, password } = req.body;
@@ -22,6 +73,10 @@ const registerUser = asyncHandler(async (req, res) => {
 
     if (!password || typeof password !== "string") {
         return res.status(400).json({ message: "Password is required" });
+    }
+
+    if (password.length < MIN_PASSWORD_LENGTH) {
+        return res.status(400).json({ message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -48,7 +103,6 @@ const registerUser = asyncHandler(async (req, res) => {
         name: user.name,
         email: user.email,
         phone: user.phone,
-        token: token,
     })
 });
 
@@ -90,9 +144,17 @@ const loginUser = asyncHandler(async (req, res) => {
     });
 
     res.status(200).json({
-        user,
-        token,
-        message: "Login successfull",
+        // Return a trimmed object — `user` was fetched with .select("+password"),
+        // so spreading it directly would leak the password hash. The auth token
+        // rides the HttpOnly cookie only; never echo it in the body.
+        user: {
+            _id: user._id,
+            name: user.name,
+            email: user.email,
+            phone: user.phone,
+            role: user.role,
+        },
+        message: "Login successful",
     })
 });
 
@@ -115,10 +177,10 @@ const forgotPassword = asyncHandler(async (req, res) => {
         // Delete any existing OTP for this email
         await OTP.deleteMany({ email: sanitizedEmail });
 
-        // Save new OTP
+        // Save new OTP (hashed at rest, matching the admin OTP flow)
         await OTP.create({
             email: sanitizedEmail,
-            otp: otpCode
+            otp: hashOtp(otpCode)
         });
 
         // Send email
@@ -146,10 +208,14 @@ const verifyOtp = asyncHandler(async (req, res) => {
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    const validOtp = await OTP.findOne({ email: sanitizedEmail, otp });
+    const { ok, reason } = await checkResetOtp(sanitizedEmail, otp);
 
-    if (!validOtp) {
-        return res.status(400).json({ message: "Invalid or expired OTP" });
+    if (!ok) {
+        return res.status(400).json({
+            message: reason === "locked"
+                ? "Too many incorrect attempts. Please request a new code."
+                : "Invalid or expired OTP",
+        });
     }
 
     res.status(200).json({ message: "OTP verified successfully" });
@@ -166,17 +232,22 @@ const resetPassword = asyncHandler(async (req, res) => {
     if (typeof otp !== "string" || !/^\d{6}$/.test(otp) || typeof email !== "string") {
         return res.status(400).json({ message: "Invalid or expired OTP" });
     }
-    if (typeof newPassword !== "string" || newPassword.length < 6) {
-        return res.status(400).json({ message: "New password must be at least 6 characters" });
+    if (typeof newPassword !== "string" || newPassword.length < MIN_PASSWORD_LENGTH) {
+        return res.status(400).json({ message: `New password must be at least ${MIN_PASSWORD_LENGTH} characters` });
     }
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    // Verify OTP one last time to ensure they didn't just bypass the previous step
-    const validOtp = await OTP.findOne({ email: sanitizedEmail, otp });
+    // Verify OTP one last time (hashed comparison + attempt cap) so the previous
+    // step can't be bypassed.
+    const { ok, reason } = await checkResetOtp(sanitizedEmail, otp);
 
-    if (!validOtp) {
-        return res.status(400).json({ message: "Invalid or expired OTP" });
+    if (!ok) {
+        return res.status(400).json({
+            message: reason === "locked"
+                ? "Too many incorrect attempts. Please request a new code."
+                : "Invalid or expired OTP",
+        });
     }
 
     // password field is select:false now, so request it explicitly
@@ -187,15 +258,41 @@ const resetPassword = asyncHandler(async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedPassword;
+    // Invalidate every session issued before this moment (all devices).
+    user.passwordChangedAt = new Date();
     await user.save();
 
-    // Delete used OTP
-    await OTP.deleteOne({ _id: validOtp._id });
+    // Delete all OTPs for this email so the code can't be reused.
+    await OTP.deleteMany({ email: sanitizedEmail });
 
     res.status(200).json({ message: "Password reset successfully" });
 });
 
 const logoutUser = asyncHandler(async (req, res) => {
+    // Revoke the current token server-side so clearing the cookie truly kills
+    // the session instead of leaving a live 7-day JWT that could be replayed.
+    try {
+        const token = readToken(req);
+        if (token) {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
+            if (decoded.jti) {
+                const user = await User.findById(decoded.id).select("+revokedTokens");
+                if (user) {
+                    const expiresAt = new Date((decoded.exp || Math.floor(Date.now() / 1000) + 7 * 24 * 3600) * 1000);
+                    // Drop already-expired entries, add this one, and bound the array.
+                    const next = (user.revokedTokens || [])
+                        .filter(t => t.expiresAt && t.expiresAt.getTime() > Date.now())
+                        .map(t => ({ jti: t.jti, expiresAt: t.expiresAt }))
+                        .concat([{ jti: decoded.jti, expiresAt }]);
+                    user.revokedTokens = next.length > 50 ? next.slice(-50) : next;
+                    await user.save();
+                }
+            }
+        }
+    } catch (err) {
+        // Invalid/expired token — nothing to revoke; still clear the cookie below.
+    }
+
     res.cookie("auth_token", "", {
         httpOnly: true,
         secure: true,
@@ -205,4 +302,44 @@ const logoutUser = asyncHandler(async (req, res) => {
     res.status(200).json({ message: "Logged out successfully" });
 });
 
-export default { registerUser, loginUser, logoutUser, forgotPassword, verifyOtp, resetPassword }
+// Edit the logged-in user's own profile (name / phone). Always scoped to
+// req.user._id — the client can never target another account by id.
+const updateProfile = asyncHandler(async (req, res) => {
+    const { name, phone } = req.body;
+
+    // Type guards (also reject NoSQL-operator payloads).
+    if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+        return res.status(400).json({ message: "Name cannot be empty" });
+    }
+    if (phone !== undefined && (typeof phone !== "string" || !/^\d{10}$/.test(phone.trim()))) {
+        return res.status(400).json({ message: "Phone must be a valid 10-digit number" });
+    }
+
+    const updates = {};
+    if (typeof name === "string" && name.trim()) updates.name = name.trim();
+    if (typeof phone === "string" && phone.trim()) updates.phone = phone.trim();
+
+    if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ message: "Nothing to update" });
+    }
+
+    const user = await User.findByIdAndUpdate(
+        req.user._id,
+        { $set: updates },
+        { new: true, runValidators: true }
+    ).select("-password");
+
+    if (!user) {
+        return res.status(404).json({ message: "User not found" });
+    }
+
+    res.status(200).json({
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        message: "Profile updated successfully",
+    });
+});
+
+export default { registerUser, loginUser, logoutUser, updateProfile, forgotPassword, verifyOtp, resetPassword }

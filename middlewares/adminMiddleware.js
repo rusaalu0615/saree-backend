@@ -34,15 +34,21 @@ const adminProtect = async (req, res, next) => {
         // 2. Verify token
         let decoded;
         try {
-            decoded = jwt.verify(token, process.env.JWT_SECRET);
+            decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
         } catch (error) {
             return res.status(401).json({ message: "Session expired or invalid. Please log in again." });
         }
 
         // 3. Locate the user
-        const user = await User.findById(decoded.id).select("-password");
+        const user = await User.findById(decoded.id).select("-password +revokedTokens");
         if (!user) {
             return res.status(401).json({ message: "Administrative account not found." });
+        }
+
+        // 3b. Reject explicitly revoked sessions (logged-out tokens).
+        if (decoded.jti && Array.isArray(user.revokedTokens) &&
+            user.revokedTokens.some(t => t.jti === decoded.jti)) {
+            return res.status(401).json({ message: "Session expired or invalid. Please log in again." });
         }
 
         // 4. Assert user role is strictly admin — verified against the DB only.
@@ -52,6 +58,13 @@ const adminProtect = async (req, res, next) => {
         // (verifyAdminOTP provisions/upgrades the role in the DB).
         if (user.role !== "admin") {
             return res.status(403).json({ message: "Access denied. Administrative privileges required." });
+        }
+
+        // 4b. Reject tokens issued before the admin's password was last changed,
+        // so a password reset invalidates every previously active admin session.
+        if (user.passwordChangedAt &&
+            user.passwordChangedAt.getTime() / 1000 > decoded.iat) {
+            return res.status(401).json({ message: "Session expired. Please log in again." });
         }
 
         // 5. Attach user to request

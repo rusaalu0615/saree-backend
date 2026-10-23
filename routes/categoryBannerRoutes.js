@@ -1,5 +1,6 @@
 import express from "express";
 import upLoadImage from "../middlewares/uploadImage.js";
+import { adminProtect } from "../middlewares/adminMiddleware.js";
 import { 
     getCategoryBannerBySlug, 
     getAllCategoryBanners, 
@@ -12,7 +13,7 @@ const router = express.Router();
 router.get("/all", getAllCategoryBanners);
 router.get("/:slug", getCategoryBannerBySlug);
 
-// Protected routes (Add auth middleware later if needed)
-router.post("/", upLoadImage.single("image"), upsertCategoryBanner);
+// Admin route to upsert a category banner
+router.post("/", adminProtect, upLoadImage.single("image"), upsertCategoryBanner);
 
 export default router;

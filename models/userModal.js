@@ -60,6 +60,17 @@ const userSchema = new mongoose.Schema({
         // must opt in with .select("+password"). Prevents accidental hash leaks.
         select: false,
     },
+    // Set whenever the password changes (reset). JWTs issued before this
+    // timestamp are rejected, so a reset signs out all other devices/sessions.
+    passwordChangedAt: { type: Date },
+    // Sessions explicitly killed before their natural expiry (logout). Each
+    // entry is the jti of a revoked token + when it would have expired, so the
+    // list self-prunes. select:false keeps it out of every API response.
+    revokedTokens: {
+        type: [{ jti: String, expiresAt: Date }],
+        default: [],
+        select: false,
+    },
     role: {
         type: String,
         enum: ["user", "admin"],
