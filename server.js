@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import connectDB from "./config/db.js";
 import cors from "cors";
+import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import compression from "compression";
 import indexRoutes from "./routes/index.js";
@@ -21,6 +22,9 @@ const isProduction = process.env.NODE_ENV === "production";
 
 // Trust reverse proxy (Nginx) for accurate IP resolution in rate-limiting
 app.set("trust proxy", 1);
+
+// Security headers (X-Content-Type-Options, HSTS, frame guarding, etc.)
+app.use(helmet());
 
 app.use(compression());
 
@@ -101,7 +105,12 @@ app.use(
     })
 );
 
-app.use(express.json({ limit: "50mb" }));
+// Keep the exact unparsed bytes on req.rawBody — required by the Razorpay
+// webhook to verify its signature against the true payload.
+app.use(express.json({
+    limit: "50mb",
+    verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(cookieParser());
 

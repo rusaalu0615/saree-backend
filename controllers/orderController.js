@@ -294,21 +294,82 @@ const createOrder = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Timing-safe HMAC comparison that tolerates different-length inputs
+ * (returns false instead of throwing like crypto.timingSafeEqual does).
+ */
+const safeCompare = (a, b) => {
+    if (typeof a !== "string" || typeof b !== "string") return false;
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) {
+        // Still burn a constant comparison so length isn't a timing signal
+        crypto.timingSafeEqual(bufA, crypto.createHash("sha256").update("").digest());
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+};
+
+/**
  * POST /api/order/verify-payment — Verify Razorpay Payment
  */
 const verifyPayment = asyncHandler(async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
 
+    const isPlainString = v => typeof v === "string" && v.length > 0 && v.length < 500;
+
+    // Client-reported payment FAILURE (orderId only, no Razorpay triple): marks a
+    // still-pending order as failed so it doesn't hang forever. Can never grant a
+    // paid status, and an already-paid order is left completely untouched.
+    if (isPlainString(orderId) && !razorpay_order_id && !razorpay_payment_id && !razorpay_signature) {
+        const pendingOrder = await Order.findOne({ orderId });
+        if (pendingOrder && pendingOrder.payment.status !== "paid") {
+            pendingOrder.payment.status = "failed";
+            pendingOrder.timeline.push({
+                status: "Payment Failed",
+                description: "Payment was not completed",
+            });
+            await pendingOrder.save();
+        }
+        throw new AppError("Payment verification failed", 400);
+    }
+
+    // 1. Every field must be a plain string — blocks NoSQL-operator payloads
+    // and the undefined-cast HMAC footgun.
+    if (![razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId].every(isPlainString)) {
+        throw new AppError("Invalid payment verification payload", 400);
+    }
+
     const order = await Order.findOne({ orderId });
     if (!order) throw new AppError("Order not found", 404);
+
+    // 2. Idempotency: an already-verified order must not be re-processed
+    // (double emails, double Shiprocket pushes, signature replay).
+    if (order.payment.status === "paid") {
+        return res.status(200).json({ success: true, message: "Payment already verified" });
+    }
+
+    // 3. THE LINK CHECK: the Razorpay order in the request MUST be the one this
+    // DB order was created with. Without this, a valid signature for ANY cheap
+    // paid order could be replayed to mark OTHER (unpaid) orders as paid.
+    if (!order.payment.razorpayOrderId || order.payment.razorpayOrderId !== razorpay_order_id) {
+        order.payment.status = "failed";
+        await order.save();
+        throw new AppError("Payment verification failed: order mismatch", 400);
+    }
+
+    if (!process.env.RAZORPAY_KEY_SECRET) {
+        throw new AppError("Payment gateway is not configured.", 500);
+    }
 
     const generatedSignature = crypto
         .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
         .update(razorpay_order_id + "|" + razorpay_payment_id)
         .digest("hex");
 
-    if (generatedSignature !== razorpay_signature) {
+    // 4. Timing-safe comparison instead of plain !==
+    if (!safeCompare(generatedSignature, razorpay_signature)) {
         order.payment.status = "failed";
+        order.payment.razorpayPaymentId = razorpay_payment_id;
         await order.save();
         throw new AppError("Payment verification failed", 400);
     }
@@ -323,7 +384,17 @@ const verifyPayment = asyncHandler(async (req, res) => {
     
     await order.save();
 
-    // Now push to shiprocket and send email
+    await fulfillPaidOrder(order);
+
+    res.status(200).json({ success: true, message: "Payment verified successfully" });
+});
+
+/**
+ * Shared fulfillment for a confirmed-paid order: Shiprocket push + customer
+ * invoice email + admin notification. Fire-and-forget inside so the payment
+ * confirmation response is never blocked on shipping/email latency.
+ */
+async function fulfillPaidOrder(order) {
     pushToShiprocket(order).catch((err) =>
         console.error(`Shiprocket push failed for order ${order.orderId}:`, err.message)
     );
@@ -332,8 +403,77 @@ const verifyPayment = asyncHandler(async (req, res) => {
         .then((pdfBuffer) => emailService.sendOrderConfirmationEmail(order, pdfBuffer))
         .then(() => emailService.sendAdminOrderNotificationEmail(order))
         .catch((err) => console.error(`[Checkout Error] Email confirmation sequence failed for ${order.orderId}:`, err));
+}
 
-    res.status(200).json({ success: true, message: "Payment verified successfully" });
+/**
+ * POST /api/order/webhook — Razorpay server-to-server payment events.
+ * This is the safety net: money captured at Razorpay is confirmed even if the
+ * customer's browser dies before /verify-payment ever lands.
+ */
+const handleRazorpayWebhook = asyncHandler(async (req, res) => {
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+        console.error("[Webhook] RAZORPAY_WEBHOOK_SECRET is not configured — rejecting");
+        return res.status(500).json({ message: "Webhook not configured" });
+    }
+
+    // 1. Authenticity: the body bytes must match Razorpay's HMAC signature
+    const signature = req.headers["x-razorpay-signature"];
+    const raw = req.rawBody;
+    if (!signature || typeof signature !== "string" || !raw) {
+        return res.status(400).json({ message: "Missing webhook signature" });
+    }
+    const expected = crypto.createHmac("sha256", webhookSecret).update(raw).digest("hex");
+    if (!safeCompare(expected, signature)) {
+        console.warn("[Webhook] Rejected event with invalid signature from", req.ip);
+        return res.status(400).json({ message: "Invalid signature" });
+    }
+
+    const event = req.body || {};
+    const payload = event.payload || {};
+    const entity = (payload.payment || payload.order) || null;
+    const rzpOrderId = entity && entity.order_id;
+
+    try {
+        if (event.event === "payment.captured" || event.event === "order.paid") {
+            if (rzpOrderId) {
+                const order = await Order.findOne({ "payment.razorpayOrderId": rzpOrderId });
+                if (order && order.payment.status !== "paid") {
+                    order.payment.status = "paid";
+                    if (entity.id) order.payment.razorpayPaymentId = entity.id;
+                    order.timeline.push({
+                        status: "Payment Successful",
+                        description: "Payment confirmed via Razorpay webhook",
+                    });
+                    await order.save();
+                    console.log(`[Webhook] Order ${order.orderId} confirmed PAID via webhook`);
+                    await fulfillPaidOrder(order);
+                }
+            }
+        } else if (event.event === "payment.failed") {
+            if (rzpOrderId) {
+                const order = await Order.findOne({ "payment.razorpayOrderId": rzpOrderId });
+                // Never downgrade a paid order — some failure events (e.g. card
+                // declined) carry the order id without capturing money.
+                if (order && order.payment.status !== "paid") {
+                    order.payment.status = "failed";
+                    order.timeline.push({
+                        status: "Payment Failed",
+                        description: "Razorpay reported the payment as failed",
+                    });
+                    await order.save();
+                    console.log(`[Webhook] Order ${order.orderId} marked FAILED via webhook`);
+                }
+            }
+        }
+    } catch (procErr) {
+        // Log but still ACK — throwing makes Razorpay mark the webhook failing
+        // and eventually stop retrying, which would defeat the whole purpose.
+        console.error("[Webhook] Processing error:", procErr);
+    }
+
+    // Always ACK unknown/duplicate events with 200 — idempotent by design
+    res.status(200).json({ success: true });
 });
 
 /**
@@ -521,23 +661,26 @@ const trackOrderPublic = asyncHandler(async (req, res) => {
         });
     }
 
-    // Case 2: Order ID (with optional Email) Tracking
-    if (!orderId) {
+    // Case 2: Order ID + Email Tracking (email is MANDATORY — Order IDs alone
+    // are guessable, so ID-only lookups were a customer PII enumeration hole)
+    if (!orderId || typeof orderId !== "string") {
         throw new AppError("Please provide an Order ID or AWB Tracking Number.", 400);
+    }
+    if (!email || typeof email !== "string" || !email.trim()) {
+        throw new AppError("Please provide the email address used on this order.", 400);
     }
 
     const cleanOrderId = orderId.trim();
+    // Exact string match with case-insensitivity — never build RegExp from user input
     const query = {
         $or: [
-            { orderId: new RegExp(`^${cleanOrderId}$`, "i") },
-            { "shiprocket.awbCode": cleanOrderId },
+            { orderId: { $eq: cleanOrderId, $options: "i" } },
+            { "shiprocket.awbCode": { $eq: cleanOrderId, $options: "i" } },
         ]
     };
 
-    // If email provided, verify it
-    if (email && typeof email === "string" && email.trim()) {
-        query["shippingAddress.email"] = new RegExp(`^${email.trim()}$`, "i");
-    }
+    // Email always required and matched literally against the shipping address
+    query["shippingAddress.email"] = { $eq: email.trim(), $options: "i" };
 
     const order = await Order.findOne(query).lean();
 
@@ -558,10 +701,7 @@ const trackOrderPublic = asyncHandler(async (req, res) => {
             // Ignore fallback error
         }
 
-        throw new AppError(
-            email ? "No order found matching this Order ID and Email." : "No order found with this ID.",
-            404
-        );
+        throw new AppError("No order found matching this Order ID and Email.", 404);
     }
 
     let tracking = null;
@@ -707,4 +847,5 @@ export default {
     updateOrderStatus,
     cancelOrder,
     verifyPayment,
+    handleRazorpayWebhook,
 };

@@ -56,6 +56,9 @@ const userSchema = new mongoose.Schema({
     },
     password: {
         type: String,
+        // Never returned by default — controllers that need to compare hashes
+        // must opt in with .select("+password"). Prevents accidental hash leaks.
+        select: false,
     },
     role: {
         type: String,

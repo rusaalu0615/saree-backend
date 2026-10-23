@@ -20,6 +20,10 @@ const registerUser = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: "User already exists" });
     }
 
+    if (!password || typeof password !== "string") {
+        return res.status(400).json({ message: "Password is required" });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await User.create({
@@ -51,24 +55,28 @@ const registerUser = asyncHandler(async (req, res) => {
 const loginUser = asyncHandler(async (req, res) => {
     const { email, password } = req.body;
 
-    if (!email) {
+    // Type guards: also blocks NoSQL-operator payloads ({"$ne": ...} has no .trim)
+    if (!email || typeof email !== "string") {
         return res.status(400).json({ message: "Email is required" });
     }
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    const user = await User.findOne({ email: sanitizedEmail });
+    // Find the user WITHOUT projecting the password hash out of the response path
+    const user = await User.findOne({ email: sanitizedEmail }).select("+password -__v");
     if (!user) {
-        return res.status(400).json({ message: "User not found" })
+        // Generic message: must be identical to the wrong-password case below,
+        // otherwise the endpoint becomes a free account-enumeration oracle.
+        return res.status(400).json({ message: "Invalid email or password" })
     }
 
-    if (!password || !user.password) {
-        return res.status(400).json({ message: "Incorrect password" })
+    if (!password || typeof password !== "string" || !user.password) {
+        return res.status(400).json({ message: "Invalid email or password" })
     }
 
     const matchPassword = await bcrypt.compare(password, user.password);
     if (!matchPassword) {
-        return res.status(400).json({ message: "Incorrect password" })
+        return res.status(400).json({ message: "Invalid email or password" })
     }
 
     const token = generateToken(user._id);
@@ -98,26 +106,26 @@ const forgotPassword = asyncHandler(async (req, res) => {
     const sanitizedEmail = email.trim().toLowerCase();
     const user = await User.findOne({ email: sanitizedEmail });
 
-    if (!user) {
-        return res.status(404).json({ message: "No user found with this email" });
+    // Never reveal whether the email exists (enumeration oracle). Respond the
+    // same way either way; only send the OTP when there is a real account.
+    if (user) {
+        // Generate 6-digit OTP (cryptographically secure)
+        const otpCode = crypto.randomInt(100000, 1000000).toString();
+
+        // Delete any existing OTP for this email
+        await OTP.deleteMany({ email: sanitizedEmail });
+
+        // Save new OTP
+        await OTP.create({
+            email: sanitizedEmail,
+            otp: otpCode
+        });
+
+        // Send email
+        await emailService.sendPasswordResetOTPEmail(sanitizedEmail, otpCode);
     }
 
-    // Generate 6-digit OTP (cryptographically secure)
-    const otpCode = crypto.randomInt(100000, 1000000).toString();
-
-    // Delete any existing OTP for this email
-    await OTP.deleteMany({ email: sanitizedEmail });
-
-    // Save new OTP
-    await OTP.create({
-        email: sanitizedEmail,
-        otp: otpCode
-    });
-
-    // Send email
-    await emailService.sendPasswordResetOTPEmail(sanitizedEmail, otpCode);
-
-    res.status(200).json({ message: "Password reset OTP sent to your email" });
+    res.status(200).json({ message: "If an account exists for this email, a reset code has been sent" });
 });
 
 const verifyOtp = asyncHandler(async (req, res) => {
@@ -127,8 +135,17 @@ const verifyOtp = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: "Email and OTP are required" });
     }
 
+    // otp MUST be a plain 6-digit string: passing an object like {"$ne": null}
+    // straight into findOne() is a NoSQL-operator auth bypass.
+    if (typeof otp !== "string" || !/^\d{6}$/.test(otp)) {
+        return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
+    if (typeof email !== "string") {
+        return res.status(400).json({ message: "Email and OTP are required" });
+    }
+
     const sanitizedEmail = email.trim().toLowerCase();
-    
+
     const validOtp = await OTP.findOne({ email: sanitizedEmail, otp });
 
     if (!validOtp) {
@@ -145,6 +162,14 @@ const resetPassword = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: "Email, OTP, and new password are required" });
     }
 
+    // Same operator-injection guard as verifyOtp
+    if (typeof otp !== "string" || !/^\d{6}$/.test(otp) || typeof email !== "string") {
+        return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
+    if (typeof newPassword !== "string" || newPassword.length < 6) {
+        return res.status(400).json({ message: "New password must be at least 6 characters" });
+    }
+
     const sanitizedEmail = email.trim().toLowerCase();
 
     // Verify OTP one last time to ensure they didn't just bypass the previous step
@@ -154,7 +179,8 @@ const resetPassword = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
-    const user = await User.findOne({ email: sanitizedEmail });
+    // password field is select:false now, so request it explicitly
+    const user = await User.findOne({ email: sanitizedEmail }).select("+password");
     if (!user) {
         return res.status(404).json({ message: "User not found" });
     }

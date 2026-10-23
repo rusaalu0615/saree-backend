@@ -15,7 +15,12 @@ const {
     updateOrderStatus,
     cancelOrder,
     verifyPayment,
+    handleRazorpayWebhook,
 } = orderController;
+
+// Razorpay server-to-server webhook — verified by HMAC signature, no JWT.
+// MUST stay before the "/:id" style routes so it is never shadowed.
+router.post("/webhook", handleRazorpayWebhook);
 
 // Public route — track by orderId + email (no login needed)
 router.post("/track-public", trackOrderPublic);
