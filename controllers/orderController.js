@@ -28,6 +28,8 @@ const createOrder = asyncHandler(async (req, res) => {
     const dbProducts = await Product.find({ _id: { $in: productIds } });
     const priceMap = new Map(dbProducts.map(p => [p._id.toString(), p]));
 
+    const MAX_QTY_PER_LINE = 10;
+
     for (const item of items) {
         const pid = (item.productId || item.id || "").toString();
         if (!priceMap.has(pid)) {
@@ -35,6 +37,11 @@ const createOrder = asyncHandler(async (req, res) => {
         }
         if (!Number.isInteger(item.quantity) || item.quantity < 1) {
             throw new AppError("Invalid item quantity", 400);
+        }
+        // Upper bound: prevents draining inventory or building an absurd single
+        // line order (stock alone is not a sufficient cap).
+        if (item.quantity > MAX_QTY_PER_LINE) {
+            throw new AppError(`Maximum ${MAX_QTY_PER_LINE} quantity allowed per item`, 400);
         }
     }
 
@@ -67,7 +74,8 @@ const createOrder = asyncHandler(async (req, res) => {
         }, 0);
         const shipping = subtotal >= 999 ? 0 : 199;
 
-        // Determine User ID (Shadow Registration for Guests)
+        // Determine User ID (Shadow Registration for Guests) — needed before
+        // the coupon claim so per-user limits can be checked atomically.
         let orderUserId;
         if (req.user) {
             orderUserId = req.user._id;
@@ -90,11 +98,20 @@ const createOrder = asyncHandler(async (req, res) => {
             orderUserId = guestUser._id;
         }
 
-        // Validate coupon server-side — discount is NEVER taken from the client
+        // Claim the coupon ATOMICALLY inside this transaction — the old flow
+        // read usedCount/usedBy here but incremented AFTER commit, so two
+        // concurrent checkouts could both pass the check and both take the
+        // discount (double-spend past usageLimit / usageLimitPerUser).
         let discount = 0;
         let appliedCouponCode = "";
         if (couponCode) {
-            const coupon = await Coupon.findOne({ code: couponCode.toUpperCase() });
+            if (typeof couponCode !== "string") {
+                throw new AppError("Coupon is invalid or has expired.", 400);
+            }
+            const cleanCode = couponCode.trim().toUpperCase();
+
+            // Pre-read for the non-atomic conditions + discount math
+            const coupon = await Coupon.findOne({ code: cleanCode });
             if (!coupon || !coupon.isValid()) {
                 throw new AppError("Coupon is invalid or has expired.", 400);
             }
@@ -107,8 +124,31 @@ const createOrder = asyncHandler(async (req, res) => {
             if (usedByUser >= coupon.usageLimitPerUser) {
                 throw new AppError("You have already used this coupon.", 400);
             }
+
+            const usageLimitBefore = coupon.usageLimit;
+            const perUserLimitBefore = coupon.usageLimitPerUser;
+            const usedBefore = coupon.usedBy.length;
+
+            // Atomic claim: only succeeds while global slots remain. $inc and
+            // $push commit/reroll back with this very transaction.
+            const claimed = await Coupon.findOneAndUpdate(
+                { code: cleanCode, isActive: true, usedCount: { $lt: usageLimitBefore } },
+                { $inc: { usedCount: 1 }, $push: { usedBy: orderUserId } },
+                { session, new: true }
+            );
+            if (!claimed) {
+                throw new AppError("Coupon is invalid or has expired.", 400);
+            }
+
+            // Per-user race check: concurrent requests can each pass the
+            // pre-read above; the $push lets us detect the double-claim here
+            // and abort the whole transaction (stock restored, no order).
+            if (usedBefore + 1 > perUserLimitBefore) {
+                throw new AppError("You have already used this coupon.", 400);
+            }
+
             discount = coupon.calculateDiscount(subtotal);
-            appliedCouponCode = coupon.code;
+            appliedCouponCode = cleanCode;
         }
 
         const total = Math.max(subtotal + shipping - discount, 0);
@@ -161,20 +201,8 @@ const createOrder = asyncHandler(async (req, res) => {
         await session.commitTransaction();
         session.endSession();
 
-        // Mark coupon as used if one was applied
-        if (couponCode) {
-            try {
-                await Coupon.findOneAndUpdate(
-                    { code: couponCode.toUpperCase() },
-                    {
-                        $inc: { usedCount: 1 },
-                        $push: { usedBy: orderUserId }
-                    }
-                );
-            } catch (couponErr) {
-                console.error("Failed to update coupon usage:", couponErr);
-            }
-        }
+        // NOTE: coupon usage (usedCount / usedBy) was already claimed atomically
+        // inside the transaction above — do NOT increment again here.
 
         // Update user: Clear cart and save new address if not already present
         try {
