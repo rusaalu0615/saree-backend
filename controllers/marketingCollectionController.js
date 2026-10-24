@@ -1,5 +1,6 @@
 import MarketingCollection from "../models/marketingCollectionModal.js";
 import { uploadImage } from "../utils/r2Upload.js";
+import { pickSchemaFields } from "../utils/security.js";
 
 // @desc    Get all marketing collections
 // @route   GET /api/marketing-collections
@@ -81,7 +82,9 @@ export const getMarketingCollections = async (req, res) => {
 export const updateMarketingCollection = async (req, res) => {
     try {
         const { key } = req.params;
-        const updateData = { ...req.body };
+        // Whitelist to declared schema fields — blocks NoSQL-operator injection
+        // ($set/$where) and mass assignment of unknown/internal fields from body.
+        const updateData = pickSchemaFields(MarketingCollection, req.body);
         
         // Handle stats if passed as string (from multipart/form-data)
         if (typeof updateData.stats === 'string') {
@@ -166,7 +169,7 @@ export const getCollectionByKey = async (req, res) => {
                 }
             };
 
-            if (defaultCollections[key]) {
+            if (Object.prototype.hasOwnProperty.call(defaultCollections, key)) {
                 try {
                     collection = await MarketingCollection.create(defaultCollections[key]);
                 } catch (e) {

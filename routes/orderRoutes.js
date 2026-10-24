@@ -14,6 +14,8 @@ const {
     getAllOrders,
     updateOrderStatus,
     cancelOrder,
+    adminRefundOrder,
+    adminPushToShiprocket,
     verifyPayment,
     handleRazorpayWebhook,
 } = orderController;
@@ -36,5 +38,7 @@ router.get("/:id/track", protect, trackOrder);
 router.get("/admin/all", adminProtect, getAllOrders);
 router.put("/admin/:id/status", adminProtect, updateOrderStatus);
 router.post("/admin/:id/cancel", adminProtect, cancelOrder);
+router.post("/admin/:id/refund", adminProtect, adminRefundOrder);
+router.post("/admin/:id/push-shiprocket", adminProtect, adminPushToShiprocket);
 
 export default router;

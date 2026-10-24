@@ -1,5 +1,6 @@
 import CelebrityBanner from "../models/celebrityBannerModal.js";
 import { uploadImage } from "../utils/r2Upload.js";
+import { pickSchemaFields } from "../utils/security.js";
 
 // @desc    Get Celebrity Collection Banner
 // @route   GET /api/celebrity-collection
@@ -28,7 +29,9 @@ export const getCelebrityBanner = async (req, res) => {
 // @access  Private/Admin
 export const upsertCelebrityBanner = async (req, res) => {
     try {
-        const updateData = { ...req.body };
+        // Whitelist to declared schema fields — blocks NoSQL-operator injection
+        // and mass assignment of unknown/internal fields from the body.
+        const updateData = pickSchemaFields(CelebrityBanner, req.body);
         
         // Handle image if uploaded via multer
         if (req.file) {

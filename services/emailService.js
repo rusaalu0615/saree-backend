@@ -45,7 +45,7 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
         if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
             const msg = "[Email] Critical configuration error: EMAIL_USER or EMAIL_PASS not set in environment variables";
             console.error(msg);
-            throw new Error(msg);
+            throw Object.assign(new Error(msg), { permanent: true });
         }
 
         const transporter = getTransporter();
@@ -134,7 +134,7 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
 
         const info = await transporter.sendMail(mailOptions);
         console.log(`[Email] Order confirmation sent successfully: ${info.messageId}`);
-        return true;
+        return { status: "sent", messageId: info.messageId };
     } catch (err) {
         console.error("[Email Error] Critical failure sending order confirmation:", {
             message: err.message,
@@ -168,35 +168,40 @@ export const verifyEmailConfig = async () => {
  * @param {String} status - The new status (shipped, in_transit, etc)
  */
 export const sendShippingUpdateEmail = async (order, status) => {
-    try {
-        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-            console.warn("[Email] Skipping shipping update — credentials not set");
-            return false;
-        }
+    // Only a few statuses carry a customer email; those are explicit SKIPS, not
+    // failures. Transport/config problems THROW so the outbox worker retries or
+    // records a permanent failure — a job is NEVER marked "sent" on a `false`.
+    if (status === "shipped" || status === "out_for_delivery" || status === "delivered") {
+        // handled below
+    } else {
+        return { status: "skipped", reason: "status_not_emailed" };
+    }
 
-        const transporter = getTransporter();
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+        throw Object.assign(new Error("[Email] EMAIL_USER/EMAIL_PASS not set — cannot send shipping update"), { permanent: true });
+    }
 
-        let statusMessage = "";
-        let subject = "";
+    let statusMessage = "";
+    let subject = "";
 
-        if (status === "shipped") {
-            subject = `Your Order ${order.orderId} has Shipped!`;
-            statusMessage = "Good news! Your order has been packed and handed over to our delivery partner.";
-        } else if (status === "out_for_delivery") {
-            subject = `Your Order ${order.orderId} is Out for Delivery!`;
-            statusMessage = "Your order is out for delivery and should arrive today.";
-        } else if (status === "delivered") {
-            subject = `Your Order ${order.orderId} has been Delivered`;
-            statusMessage = "Your order has been successfully delivered. We hope you love your purchase!";
-        } else {
-            return false; // Don't send emails for other statuses
-        }
+    if (status === "shipped") {
+        subject = `Your Order ${order.orderId} has Shipped!`;
+        statusMessage = "Good news! Your order has been packed and handed over to our delivery partner.";
+    } else if (status === "out_for_delivery") {
+        subject = `Your Order ${order.orderId} is Out for Delivery!`;
+        statusMessage = "Your order is out for delivery and should arrive today.";
+    } else {
+        subject = `Your Order ${order.orderId} has been Delivered`;
+        statusMessage = "Your order has been successfully delivered. We hope you love your purchase!";
+    }
 
-        const mailOptions = {
-            from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
-            to: order.shippingAddress.email,
-            subject: subject,
-            html: `
+    const transporter = getTransporter();
+
+    const mailOptions = {
+        from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
+        to: order.shippingAddress.email,
+        subject: subject,
+        html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                     <div style="text-align: center; padding: 20px 0;">
                         <h1 style="color: #8B7355; margin: 0;">MS HANDLOOM</h1>
@@ -223,14 +228,17 @@ export const sendShippingUpdateEmail = async (order, status) => {
                     </div>
                 </div>
             `,
-        };
+    };
 
+    try {
         const info = await transporter.sendMail(mailOptions);
         console.log(`[Email] Shipping update (${status}) sent: ${info.messageId}`);
-        return true;
+        return { status: "sent", messageId: info.messageId };
     } catch (err) {
+        // Transport failure — THROW so the worker keeps the job retryable rather
+        // than falsely marking a never-delivered email as "sent".
         console.error("[Email Error] Failed to send shipping update:", err);
-        return false;
+        throw err;
     }
 };
 
@@ -347,11 +355,15 @@ export const sendPasswordResetOTPEmail = async (email, otp) => {
  */
 export const sendAdminOrderNotificationEmail = async (order) => {
     try {
-        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) return false;
-        
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+            throw Object.assign(new Error("[Email] EMAIL_USER/EMAIL_PASS not set — cannot send admin notification"), { permanent: true });
+        }
+
         // Use ADMIN_EMAILS if configured, otherwise fallback to EMAIL_USER
         const adminEmails = process.env.ADMIN_EMAILS || process.env.EMAIL_USER;
-        if (!adminEmails) return false;
+        if (!adminEmails) {
+            throw Object.assign(new Error("[Email] No admin recipient configured (ADMIN_EMAILS/EMAIL_USER)"), { permanent: true });
+        }
 
         const transporter = getTransporter();
         
@@ -395,10 +407,10 @@ export const sendAdminOrderNotificationEmail = async (order) => {
 
         const info = await transporter.sendMail(mailOptions);
         console.log(`[Email] Admin notification sent successfully: ${info.messageId}`);
-        return true;
+        return { status: "sent", messageId: info.messageId };
     } catch (err) {
         console.error("[Email Error] Failed to send admin order notification:", err.message);
-        return false;
+        throw err;
     }
 };
 

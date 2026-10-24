@@ -7,6 +7,7 @@ import cookieParser from "cookie-parser";
 import compression from "compression";
 import indexRoutes from "./routes/index.js";
 import categoryBannerRoutes from "./routes/categoryBannerRoutes.js";
+import { startReservationSweeper } from "./services/reservationSweeper.js";
 import { globalLimiter } from "./middlewares/rateLimiter.js";
 import { csrfGuard } from "./middlewares/csrfGuard.js";
 import AppError from "./utils/AppError.js";
@@ -172,6 +173,13 @@ const startServer = async () => {
 
         app.listen(PORT, () => {
             console.log(`Server is running on port ${PORT}`);
+            // Internal recovery job — expires abandoned reservations, replays
+            // unprocessed webhooks, and resumes stalled fulfillment pipelines.
+            // Runs in every process because every stage is DB-guarded, but a
+            // multi-instance deploy should enable it on exactly one worker.
+            if (process.env.ENABLE_SWEEPER !== "false") {
+                startReservationSweeper();
+            }
         });
     } catch (error) {
         console.error("Server startup failed:", error);

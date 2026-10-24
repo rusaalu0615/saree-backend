@@ -1,6 +1,8 @@
 import express from "express";
 import wishlistController from "../controllers/wishlistController.js";
 import { protect } from "../middlewares/authMiddleware.js";
+import validate from "../middlewares/validate.js";
+import { addToWishlistSchema, syncWishlistSchema } from "../validations/schemas.js";
 
 const router = express.Router();
 
@@ -8,8 +10,8 @@ const router = express.Router();
 router.use(protect);
 
 router.get("/", wishlistController.getWishlist);
-router.post("/add", wishlistController.addToWishlist);
-router.post("/sync", wishlistController.syncWishlist);
+router.post("/add", validate(addToWishlistSchema), wishlistController.addToWishlist);
+router.post("/sync", validate(syncWishlistSchema), wishlistController.syncWishlist);
 router.delete("/clear", wishlistController.clearWishlist);
 router.delete("/:productId", wishlistController.removeFromWishlist);
 

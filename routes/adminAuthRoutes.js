@@ -2,12 +2,14 @@ import express from "express";
 import { sendAdminOTP, verifyAdminOTP } from "../controllers/adminAuthController.js";
 import { adminProtect } from "../middlewares/adminMiddleware.js";
 import { authLimiter } from "../middlewares/rateLimiter.js";
+import validate from "../middlewares/validate.js";
+import { adminSendOtpSchema, adminVerifyOtpSchema } from "../validations/schemas.js";
 
 const router = express.Router();
 
 // Public routes for OTP authorization
-router.post("/send-otp", authLimiter, sendAdminOTP);
-router.post("/verify-otp", authLimiter, verifyAdminOTP);
+router.post("/send-otp", authLimiter, validate(adminSendOtpSchema), sendAdminOTP);
+router.post("/verify-otp", authLimiter, validate(adminVerifyOtpSchema), verifyAdminOTP);
 
 // Protected token validation route (called by frontend Layout on mount)
 router.get("/verify-token", adminProtect, (req, res) => {

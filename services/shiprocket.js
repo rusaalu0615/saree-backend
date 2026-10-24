@@ -11,11 +11,32 @@
 let cachedToken = null;
 let tokenExpiry = null;
 
+// Bounded token-refresh: concurrent callers share ONE in-flight login instead
+// of stacking several authentications when the cached token has lapsed or a
+// burst of requests all hit a 401 at once.
+let authInFlight = null;
+
 const SHIPROCKET_BASE = "https://apiv2.shiprocket.in/v1/external";
+
+// Every outbound call is capped so a hung Shiprocket socket can never pin a
+// fulfillment worker indefinitely. Timeouts surface as AbortError, which the
+// controller treats as an AMBIGUOUS failure and reconciles rather than retrying
+// blindly (a create may have succeeded server-side despite our timeout).
+const REQUEST_TIMEOUT_MS = Number(process.env.SHIPROCKET_TIMEOUT_MS || 20000);
+
+async function fetchWithTimeout(url, options = {}) {
+    const signal =
+        options.signal ||
+        (typeof AbortSignal !== "undefined" && AbortSignal.timeout
+            ? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+            : undefined);
+    return fetch(url, { ...options, signal });
+}
 
 /**
  * Authenticate with Shiprocket and cache the bearer token (valid ~10 days).
- * We refresh every 24 hours to be safe.
+ * We refresh every 24 hours to be safe. Concurrent misses are de-duplicated so
+ * only one login request is ever in flight.
  */
 async function getToken() {
     // Return cached token if still valid
@@ -23,41 +44,49 @@ async function getToken() {
         return cachedToken;
     }
 
+    if (authInFlight) return authInFlight;
+
     const email = process.env.SHIPROCKET_EMAIL;
     const password = process.env.SHIPROCKET_PASSWORD;
-
-    console.log('SR_EMAIL:', JSON.stringify(process.env.SHIPROCKET_EMAIL));
-    console.log('SR_PASS len:', process.env.SHIPROCKET_PASSWORD?.length);
 
     if (!email || !password) {
         throw new Error("Shiprocket credentials not configured. Set SHIPROCKET_EMAIL and SHIPROCKET_PASSWORD in .env");
     }
 
-    const res = await fetch(`${SHIPROCKET_BASE}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-    });
+    authInFlight = (async () => {
+        try {
+            const res = await fetchWithTimeout(`${SHIPROCKET_BASE}/auth/login`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email, password }),
+            });
 
-    const data = await res.json();
+            const data = await res.json();
 
-    if (!res.ok || !data.token) {
-        throw new Error(`Shiprocket auth failed: ${data.message || res.statusText}`);
-    }
+            if (!res.ok || !data.token) {
+                throw new Error(`Shiprocket auth failed: ${data.message || res.statusText}`);
+            }
 
-    cachedToken = data.token;
-    tokenExpiry = Date.now() + 24 * 60 * 60 * 1000; // Refresh every 24h
+            cachedToken = data.token;
+            tokenExpiry = Date.now() + 24 * 60 * 60 * 1000; // Refresh every 24h
 
-    return cachedToken;
+            return cachedToken;
+        } finally {
+            authInFlight = null;
+        }
+    })();
+
+    return authInFlight;
 }
 
 /**
- * Make an authenticated request to Shiprocket API
+ * Make an authenticated request to Shiprocket API.
+ * On a 401 the cached token is discarded and the call retried once — this
+ * covers token invalidation (password change / re-login elsewhere) without
+ * every deploy needing a restart.
  */
 async function shiprocketFetch(endpoint, options = {}) {
-    const token = await getToken();
-
-    const res = await fetch(`${SHIPROCKET_BASE}${endpoint}`, {
+    const doCall = async (token) => fetchWithTimeout(`${SHIPROCKET_BASE}${endpoint}`, {
         ...options,
         headers: {
             "Content-Type": "application/json",
@@ -66,12 +95,28 @@ async function shiprocketFetch(endpoint, options = {}) {
         },
     });
 
+    let res = await doCall(await getToken());
+
+    if (res.status === 401) {
+        console.warn(`[Shiprocket] 401 on ${endpoint} — refreshing token and retrying once`);
+        cachedToken = null;
+        tokenExpiry = null;
+        res = await doCall(await getToken());
+    }
+
     const data = await res.json();
 
     if (!res.ok) {
         const errorMsg = data.message || data.errors || res.statusText;
         console.error(`Shiprocket API error [${endpoint}]:`, errorMsg);
         throw new Error(`Shiprocket API error: ${JSON.stringify(errorMsg)}`);
+    }
+
+    // Application-level success: Shiprocket returns HTTP 200 with a business
+    // error body ({"success":false} or {"data":{"error":...}}). Treat those as
+    // failures so callers never mistake a rejected action for a fulfilled one.
+    if (data && data.success === false) {
+        throw new Error(`Shiprocket rejected [${endpoint}]: ${JSON.stringify(data.message || data.errors || data).slice(0, 300)}`);
     }
 
     return data;
@@ -94,11 +139,22 @@ const STATE_MAP = {
 };
 
 /**
+ * Estimate shipment weight (kg) from item count — 0.5kg per unit, floor 0.5kg.
+ * Used for both the adhoc payload and courier serviceability so the courier
+ * billable weight matches what is actually in the parcel.
+ */
+function calculateWeight(order) {
+    const units = order.items.reduce((sum, item) => sum + (item.quantity || 1), 0);
+    return Math.max(0.5, +(units * 0.5).toFixed(2));
+}
+
+/**
  * Create an order in Shiprocket
  * @param {Object} order - Our database Order document
  */
 async function createShiprocketOrder(order) {
     const pickupLocation = process.env.SHIPROCKET_PICKUP_LOCATION || "Primary";
+    const weight = calculateWeight(order);
 
     // Resolve state abbreviation to full name
     const stateCode = order.shippingAddress.state;
@@ -132,17 +188,18 @@ async function createShiprocketOrder(order) {
         length: 30,
         breadth: 25,
         height: 5,
-        weight: 0.5,
+        weight,
     };
 
-    console.log(`[Shiprocket] Creating order ${order.orderId} →`, JSON.stringify(payload, null, 2));
+    // Log only non-PII fields — never dump the customer's address/contact to stdout
+    console.log(`[Shiprocket] Creating adhoc order ${order.orderId} → pincode ${order.shippingAddress.pincode}, weight ${weight}kg, payment ${payload.payment_method}`);
 
     const result = await shiprocketFetch("/orders/create/adhoc", {
         method: "POST",
         body: JSON.stringify(payload),
     });
 
-    console.log(`[Shiprocket] Order ${order.orderId} created →`, JSON.stringify(result));
+    console.log(`[Shiprocket] Order ${order.orderId} created → shipment_id ${result.shipment_id}, sr order_id ${result.order_id}`);
     return result;
 }
 
@@ -242,12 +299,89 @@ async function generatePickup(shipmentId) {
     });
 }
 
+/**
+ * Reconcile an ambiguous create: find an already-existing Shiprocket shipment
+ * by OUR order id (not the Shiprocket id we failed to capture).
+ *
+ * EXPLICIT LOOKUP OUTCOMES — the caller must never read a broken/ambiguous
+ * lookup as "definitely not there" and then create a duplicate shipment:
+ *   { outcome: "FOUND",            shipment: { srOrderId, shipmentId, status } }
+ *   { outcome: "CONFIRMED_ABSENT" }  a well-formed, complete listing that
+ *                                     genuinely contains no exact match.
+ *   { outcome: "UNKNOWN" }           malformed body, incomplete/absent page
+ *                                     metadata, or a network/timeout error.
+ *
+ * The order list endpoint exposes a `filter[search]` term that matches our
+ * custom order_id; we still re-match the exact record defensively because the
+ * search term is broad. We validate the Shiprocket ORDER id and the SHIPMENT id
+ * as two SEPARATE fields — a record that only yields one of them is UNKNOWN
+ * (incomplete), never a place to substitute the order id for the shipment id.
+ */
+async function findShipmentByOurOrderId(ourOrderId) {
+    if (!ourOrderId) return { outcome: "UNKNOWN", reason: "no_order_id" };
+    const trimmed = String(ourOrderId).trim();
+    const safe = encodeURIComponent(trimmed);
+    if (!safe) return { outcome: "UNKNOWN", reason: "blank_order_id" };
+
+    let data;
+    try {
+        // A listing failure must NOT be read as "not found" by a caller that
+        // would then create a duplicate — a network/HTTP error is UNKNOWN.
+        data = await shiprocketFetch(`/orders?status=all&filter%5Bsearch%5D=${safe}&page=1`);
+    } catch (err) {
+        return { outcome: "UNKNOWN", reason: "fetch_failed", error: String(err.message || err).slice(0, 200) };
+    }
+
+    // Accept the known list shapes; a body we cannot parse into an array is
+    // INCOMPLETE/MALFORMED → UNKNOWN, not absence.
+    const envelope = (data && data.data) ? data.data : data;
+    const records =
+        (envelope && Array.isArray(envelope.orders)) ? envelope.orders :
+        (data && Array.isArray(data.orders)) ? data.orders :
+        (Array.isArray(envelope) ? envelope : null);
+
+    if (!Array.isArray(records)) return { outcome: "UNKNOWN", reason: "malformed_body" };
+
+    // Confirm the response looks like a complete first page. Shiprocket returns
+    // pagination metadata (current_page / from / to / last_page or total). A
+    // bare empty array with NO pagination metadata can be an indexing lag right
+    // after create, so a single such lookup does NOT prove absence → UNKNOWN.
+    const hasPageMeta = envelope && (
+        envelope.current_page !== undefined ||
+        envelope.last_page !== undefined ||
+        envelope.total !== undefined ||
+        envelope.from !== undefined
+    );
+
+    const match = records.find((o) => {
+        const theirOrderId = o?.order_id ?? o?.display_order_id;
+        return theirOrderId && String(theirOrderId).trim().toUpperCase() === trimmed.toUpperCase();
+    });
+
+    if (match) {
+        const srOrderId = match.id ?? match.order_id ?? null;   // Shiprocket numeric ORDER id
+        const shipmentId = match.shipment_id ?? null;           // DISTINCT shipment id — never default to order id
+        if (!srOrderId || !shipmentId) {
+            // Incomplete record — do not substitute one id for the other.
+            return { outcome: "UNKNOWN", reason: "incomplete_match" };
+        }
+        return { outcome: "FOUND", shipment: { srOrderId, shipmentId, status: match.status ?? null } };
+    }
+
+    // No exact match. Only a well-formed, paginated listing proves absence; an
+    // empty body without page metadata is too early to trust → UNKNOWN.
+    if (records.length === 0 && !hasPageMeta) return { outcome: "UNKNOWN", reason: "empty_without_page_meta" };
+    return { outcome: "CONFIRMED_ABSENT" };
+}
+
 export default {
     getToken,
+    calculateWeight,
     createShiprocketOrder,
     assignCourier,
     trackByAWB,
     trackByShiprocketOrderId,
+    findShipmentByOurOrderId,
     cancelShiprocketOrder,
     generatePickup,
 };

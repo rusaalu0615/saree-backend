@@ -1,6 +1,7 @@
 import Coupon from "../models/couponModal.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import { pickSchemaFields } from "../utils/security.js";
 
 /**
  * POST /api/coupon/apply — User applies a coupon to cart
@@ -99,7 +100,9 @@ const createCoupon = asyncHandler(async (req, res) => {
  * PUT /api/coupon/:id — Update a coupon (Admin)
  */
 const updateCoupon = asyncHandler(async (req, res) => {
-    const coupon = await Coupon.findByIdAndUpdate(req.params.id, req.body, {
+    // Whitelist to declared schema fields so the update doc can't carry
+    // NoSQL-operator keys ($set/$where) or unknown/internal fields.
+    const coupon = await Coupon.findByIdAndUpdate(req.params.id, pickSchemaFields(Coupon, req.body), {
         new: true,
         runValidators: true,
     });

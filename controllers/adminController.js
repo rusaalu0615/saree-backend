@@ -2,6 +2,7 @@ import Order from "../models/orderModal.js";
 import User from "../models/userModal.js";
 import Product from "../models/productModal.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import { escapeRegex } from "../utils/security.js";
 
 // ============================================================
 // DASHBOARD STATS
@@ -214,7 +215,11 @@ const getCustomers = asyncHandler(async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
-    const search = req.query.search || "";
+    // Coerce to a single string (a repeated ?search= would arrive as an array)
+    // and escape it: the value is used inside $regex, so raw input would allow
+    // regex injection / ReDoS against the users collection.
+    const rawSearch = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const search = escapeRegex(rawSearch);
 
     // Build search filter
     const filter = {};

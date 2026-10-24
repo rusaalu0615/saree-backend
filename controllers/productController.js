@@ -6,6 +6,16 @@ import {
     deleteFromR2,
     deleteMultipleFromR2,
 } from "../utils/r2Upload.js";
+import { escapeRegex } from "../utils/security.js";
+
+// Filter values arrive from PUBLIC query/path params. escapeRegex (shared util)
+// neutralizes any injected metacharacters / ReDoS pattern; the only construct
+// we still inject ourselves is the dash-tolerant class built by dashPattern().
+// Build the dash-tolerant anchored body from one user token, safely.
+const dashPattern = (val) => escapeRegex(val.trim()).replace(/-/g, "[\\s\\-]*");
+// Bound the number of comma-separated filter tokens so a request can't force
+// the DB to evaluate an unbounded regex list.
+const MAX_FILTER_TOKENS = 30;
 
 const addProduct = async (req, res) => {
     try {
@@ -117,19 +127,24 @@ const getAllProducts = async (req, res) => {
 
         // 2. Exact Match Filters
         if (category) {
-            const categoriesList = category.split(',').map(c => c.trim());
-            const regexList = categoriesList.map(c => {
-                const pattern = c.replace(/-/g, "[\\s\\-]*");
-                return new RegExp(`^${pattern}$`, "i");
-            });
+            const regexList = category
+                .split(',')
+                .slice(0, MAX_FILTER_TOKENS)
+                .map(c => new RegExp(`^${dashPattern(c)}$`, "i"));
             filter.category = { $in: regexList };
         }
         if (color) {
-            const colorList = color.split(',').map(c => new RegExp(`^${c.trim().replace(/-/g, "[\\s\\-]*")}$`, "i"));
+            const colorList = color
+                .split(',')
+                .slice(0, MAX_FILTER_TOKENS)
+                .map(c => new RegExp(`^${dashPattern(c)}$`, "i"));
             filter.color = { $in: colorList };
         }
         if (material) {
-            const materialList = material.split(',').map(c => new RegExp(`^${c.trim().replace(/-/g, "[\\s\\-]*")}$`, "i"));
+            const materialList = material
+                .split(',')
+                .slice(0, MAX_FILTER_TOKENS)
+                .map(c => new RegExp(`^${dashPattern(c)}$`, "i"));
             filter.material = { $in: materialList };
         }
 
@@ -270,7 +285,8 @@ const getProductById = async (req, res) => {
 const getProductBySku = async (req, res) => {
     try {
         const sku = decodeURIComponent(req.params.sku);
-        const product = await productModal.findOne({ sku: { $regex: new RegExp(`^${sku}$`, 'i') } }).lean();
+        // Escape the SKU so a path param can't inject a regex / ReDoS pattern.
+        const product = await productModal.findOne({ sku: { $regex: new RegExp(`^${escapeRegex(sku)}$`, 'i') } }).lean();
         if (!product) {
             return res.status(404).json({
                 success: false,

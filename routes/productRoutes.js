@@ -3,6 +3,8 @@ import productController from "../controllers/productController.js";
 import upLoadImage from "../middlewares/uploadImage.js";
 import upLoadVideo from "../middlewares/uploadVideo.js";
 import { adminProtect } from "../middlewares/adminMiddleware.js";
+import validate from "../middlewares/validate.js";
+import { addProductSchema } from "../validations/schemas.js";
 
 const { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters } = productController;
 
@@ -19,7 +21,7 @@ router.post("/add-product", adminProtect, upLoadImage.fields([
     { name: "mainImage", maxCount: 1 },
     { name: "galleryImages", maxCount: 10 },
     { name: "videoFile", maxCount: 1 },
-]), addProduct);
+]), validate(addProductSchema), addProduct);
 
 router.put("/update/:id", adminProtect, upLoadImage.fields([
     { name: "mainImage", maxCount: 1 },
