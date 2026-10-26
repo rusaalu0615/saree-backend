@@ -5,6 +5,7 @@ import Product from "../models/productModal.js";
 import User from "../models/userModal.js";
 import Coupon from "../models/couponModal.js";
 import WebhookEvent from "../models/webhookEventModel.js";
+import EmailJob from "../models/emailJobModel.js";
 import shiprocket from "../services/shiprocket.js";
 import emailService from "../services/emailService.js";
 import invoiceService from "../services/invoiceService.js";
@@ -12,6 +13,10 @@ import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import razorpayInstance from "../config/razorpay.js";
 import { safeCompare, hashToken, toPaise, toRupees } from "../utils/security.js";
+import { ensureGatewayOrder } from "../services/gatewayOrder.js";
+import { settleCartAfterPayment, applyCodCartAndAddress } from "../services/cartSettlement.js";
+import { executeOrderTransition } from "../services/orderTransitions.js";
+import { ensureDatabaseReady } from "../config/indexReadiness.js";
 import {
     reconcileOrderPayments,
     findPaymentRefunds,
@@ -33,6 +38,7 @@ import {
     finalizeRefundState,
     adoptGatewayRefund,
     enqueueShippingEmail,
+    enqueueEmails,
     scheduleFulfillment,
 } from "../services/orderLifecycle.js";
 import { runFulfillmentForOrder } from "../services/fulfillmentWorker.js";
@@ -52,33 +58,48 @@ const MAX_QTY_PER_LINE = 10;
 const RESERVATION_WINDOW_MS =
     1000 * 60 * Number(process.env.PAYMENT_RESERVATION_WINDOW_MIN || 30);
 
-// NOTE: inventory-release eligibility is decided by order.reservation.state in
-// the shared lifecycle service, NOT by an order.status allowlist — so a caller
-// that has already flipped the display status to "cancelled" still releases and
-// a dispatched parcel correctly waits for a verified physical return.
-
 const isPlainString = (v) => typeof v === "string" && v.length > 0 && v.length < 500;
 
 // ---------------------------------------------------------------------------
-// Collection pre-creation. MongoDB throws InvalidNamespace when a transaction
-// implicitly creates a collection, so orders/products/coupons/users are ensured
-// BEFORE the first session. NOTE: transactions require a MongoDB replica set
-// (Atlas provides one by default); ATLAS/RS is a deployment prerequisite.
+// Collection and critical unique index readiness
 // ---------------------------------------------------------------------------
+const CHECKOUT_COLLECTION_MODELS = [Order, Product, Coupon, User, WebhookEvent, EmailJob];
+
+async function prepareCollection(model) {
+    try {
+        await model.createCollection();
+    } catch (err) {
+        if (err.code !== 48 && err.codeName !== "NamespaceExists") throw err;
+    }
+    try {
+        await model.createIndexes();
+    } catch (err) {
+        console.warn(
+            `[checkout] Index build skipped for "${model.modelName}" ` +
+                `(${err.codeName || err.code || "error"}: ${err.message}).`
+        );
+    }
+}
+
 let collectionsReady = null;
 function ensureCheckoutCollections() {
     if (!collectionsReady) {
-        // Model.init() creates missing collections + declared indexes, outside
-        // any transaction. Idempotent and cached process-wide.
-        collectionsReady = Promise.all([
-            Order.init(),
-            Product.init(),
-            Coupon.init(),
-            User.init(),
-            WebhookEvent.init(),
-        ]).catch((err) => {
-            collectionsReady = null; // allow retry on next request
-            throw err;
+        collectionsReady = ensureDatabaseReady().then((res) => {
+            if (!res.isReady) {
+                collectionsReady = null;
+                throw new AppError(
+                    "The store is briefly unavailable while database indexes are being prepared. Please try again.",
+                    503
+                );
+            }
+            return res;
+        }).catch((err) => {
+            collectionsReady = null;
+            console.error("[checkout] Collection readiness failed:", err.message);
+            throw new AppError(
+                "The store is briefly unavailable while it prepares the database. Please try again in a moment.",
+                503
+            );
         });
     }
     return collectionsReady;
@@ -213,13 +234,19 @@ const createOrder = asyncHandler(async (req, res) => {
             // missing — but never a second local order. A captured-but-unlinked
             // payment is reconciled by verify/webhook, never by re-charging.
             if (existing.payment.method !== "cod" && !existing.payment.razorpayOrderId && toPaise(existing.pricing.total) > 0) {
-                const rzpOrder = await razorpayInstance.orders.create({
-                    amount: toPaise(existing.pricing.total),
-                    currency: "INR",
-                    receipt: existing.orderId,
+                const gwResult = await ensureGatewayOrder(razorpayInstance, existing);
+                if (gwResult.kind === "rejected") {
+                    return res.status(409).json({
+                        success: false,
+                        code: "CHECKOUT_ATTEMPT_FAILED",
+                        message: gwResult.message || "Payment gateway rejected the order initialization.",
+                    });
+                }
+                return res.status(201).json({
+                    success: true,
+                    replayed: true,
+                    order: buildCheckoutOrderResponse(gwResult.order),
                 });
-                existing.payment.razorpayOrderId = rzpOrder.id;
-                await existing.save();
             }
             return res.status(201).json({
                 success: true,
@@ -284,31 +311,21 @@ const createOrder = asyncHandler(async (req, res) => {
         );
         const shippingPaise = subtotalPaise >= toPaise(999) ? 0 : toPaise(199);
 
-        // Determine User ID (Shadow Registration for Guests) — needed before
-        // the coupon claim so per-user limits can be checked atomically.
-        if (req.user) {
+        // Determine User ID — Guests NEVER adopt registered accounts.
+        const isGuest = !req.user;
+        if (!isGuest) {
             orderUserId = req.user._id;
         } else {
-            const guestEmail = shippingAddress.email.toLowerCase();
-            let guestUser = await User.findOne({ email: guestEmail }).session(session);
-            if (!guestUser) {
-                guestUser = new User({
-                    name: `${shippingAddress.firstName} ${shippingAddress.lastName}`.trim(),
-                    email: guestEmail,
-                    phone: shippingAddress.phone,
-                    password: crypto.randomBytes(8).toString("hex"),
-                });
-                // Collection was pre-ensured above, so saving inside the
-                // transaction is safe (no InvalidNamespace).
-                await guestUser.save({ session });
-            }
-            orderUserId = guestUser._id;
+            orderUserId = undefined;
         }
 
         // ---- Claim the coupon ATOMICALLY inside this transaction ----
         let discountPaise = 0;
         let appliedCouponCode = "";
         if (couponCode) {
+            if (isGuest) {
+                throw new AppError("Please log in to apply discount coupons.", 400);
+            }
             const cleanCode = couponCode.trim().toUpperCase();
 
             const coupon = await Coupon.findOne({ code: cleanCode }).session(session);
@@ -371,7 +388,8 @@ const createOrder = asyncHandler(async (req, res) => {
 
         const cod = paymentMethod === "cod";
         order = new Order({
-            user: orderUserId,
+            user: isGuest ? undefined : orderUserId,
+            isGuest: isGuest,
             checkoutKey: checkoutKey || undefined,
             checkoutPayloadHash: payloadHash,
             items: productIds.map((pid) => {
@@ -428,11 +446,18 @@ const createOrder = asyncHandler(async (req, res) => {
         // Order save is PART of the transaction now (collections are pre-ensured).
         await order.save({ session });
 
-        // COD: only the purchased items leave the server cart, AFTER commit-safe
-        // work below; prepaid cart clearing waits for authoritative payment
-        // confirmation so an abandoned payment never silently eats the cart.
-        if (cod) {
-            await applyCodCartAndAddress(orderUserId, order, shippingAddress, session);
+        // COD or zero-payable: enqueue confirmation & admin emails inside session
+        if (cod || totalPaise === 0) {
+            await enqueueEmails(order, session);
+        }
+
+        // COD or zero-payable: settle cart and update address book for authenticated users;
+        // for guests, mark cartSettled: true on the order without touching any user account.
+        if (cod || totalPaise === 0) {
+            await applyCodCartAndAddress(order, shippingAddress, {
+                session,
+                isAuthenticated: !isGuest && Boolean(req.user),
+            });
         }
 
         await session.commitTransaction();
@@ -446,36 +471,26 @@ const createOrder = asyncHandler(async (req, res) => {
     // ---- Post-commit ----
 
     if (order.payment.method !== "cod" && toPaise(order.pricing.total) > 0) {
-        try {
-            const rzpOrder = await razorpayInstance.orders.create({
-                amount: toPaise(order.pricing.total),
-                currency: "INR",
-                receipt: order.orderId,
-            });
-            order.payment.razorpayOrderId = rzpOrder.id;
-            await order.save();
+        const gwResult = await ensureGatewayOrder(razorpayInstance, order);
 
-            return res.status(201).json({
-                success: true,
-                order: buildCheckoutOrderResponse(order, checkoutToken),
-            });
-        } catch (rzpErr) {
-            console.error("Razorpay order creation failed:", rzpErr);
-            // Local order is committed but unpayable — mark failed and release
-            // the reserved resources instead of stranding them.
-            try {
-                order.payment.status = "failed";
-                order.timeline.push({
-                    status: "Payment Initiation Failed",
-                    description: "Could not create the Razorpay order. Please place the order again.",
-                });
-                await order.save();
-                await releaseOrderResources(order, { reason: "gateway-init-failed" });
-            } catch (cleanupErr) {
-                console.error(`[createOrder] Cleanup after gateway failure failed for ${order.orderId}:`, cleanupErr);
-            }
-            throw new AppError("Failed to initiate payment. Please try again.", 500);
+        if (gwResult.kind === "rejected") {
+            // Rejection was already recorded and resources released in gatewayOrder.js
+            throw new AppError(gwResult.error?.message || gwResult.message || "Failed to initiate payment. Please try again.", 400);
         }
+
+        if (gwResult.kind === "terminal") {
+            return res.status(409).json({
+                success: false,
+                code: "CHECKOUT_ATTEMPT_FAILED",
+                message: gwResult.message || "Order is in a terminal state",
+                order: buildCheckoutOrderResponse(gwResult.order, checkoutToken),
+            });
+        }
+
+        return res.status(201).json({
+            success: true,
+            order: buildCheckoutOrderResponse(gwResult.order, checkoutToken),
+        });
     }
 
     // Zero-payable prepaid order (100% coupon): already settled at creation with
@@ -551,51 +566,7 @@ function buildCheckoutOrderResponse(order, checkoutToken) {
     return resp;
 }
 
-// COD / confirmed orders: remove exactly the purchased QUANTITIES from the
-// server cart (preserving extra units added meanwhile) + save address.
-async function applyCodCartAndAddress(orderUserId, order, shippingAddress, session) {
-    const user = await User.findById(orderUserId).session(session);
-    if (!user) return;
 
-    // Quantity-accurate settlement (spec §11): decrement purchased units per
-    // product across cart lines instead of deleting whole product ids.
-    const need = new Map();
-    for (const it of order.items) {
-        if (it.productId) need.set(String(it.productId), (need.get(String(it.productId)) || 0) + (it.quantity || 1));
-    }
-    const nextCart = [];
-    for (const line of user.cart) {
-        const obj = line && line.toObject ? line.toObject({ versionKey: false }) : { ...line };
-        const pid = String(obj.productId);
-        const remaining = need.get(pid) || 0;
-        if (remaining <= 0) { nextCart.push(obj); continue; }
-        const qty = obj.quantity || 1;
-        const take = Math.min(remaining, qty);
-        need.set(pid, remaining - take);
-        const left = qty - take;
-        if (left > 0) nextCart.push({ ...obj, quantity: left });
-    }
-    user.cart = nextCart;
-
-    const newAddr = {
-        fullName: `${shippingAddress.firstName} ${shippingAddress.lastName}`.trim(),
-        mobile: shippingAddress.phone,
-        pincode: shippingAddress.pincode,
-        state: shippingAddress.state,
-        city: shippingAddress.city,
-        address: shippingAddress.address,
-        landmark: shippingAddress.landmark || "",
-    };
-    const isDuplicate = user.address.some(
-        (addr) =>
-            addr.pincode === newAddr.pincode &&
-            String(addr.address).toLowerCase() === newAddr.address.toLowerCase() &&
-            String(addr.city).toLowerCase() === newAddr.city.toLowerCase()
-    );
-    if (!isDuplicate) user.address.push(newAddr);
-
-    await user.save({ session });
-}
 
 // ---------------------------------------------------------------------------
 // Payment lifecycle helpers (also used by the reservation sweeper)
@@ -786,143 +757,331 @@ const verifyPayment = asyncHandler(async (req, res) => {
         throw new AppError("COD orders do not require payment verification.", 400);
     }
 
-    // 2. Idempotent fast path.
+    // 2. Terminal state / idempotent fast path.
     if (order.payment.status === "paid") {
-        return res.status(200).json({ success: true, status: "paid", message: "Payment already verified" });
+        if (order.fulfillmentHold?.active) {
+            return res.status(200).json({
+                success: true,
+                status: "paid",
+                outcome: "held",
+                message: `Order is on hold for review: ${order.fulfillmentHold.reason || "Review required"}`,
+                orderId: order.orderId,
+            });
+        }
+        return res.status(200).json({
+            success: true,
+            status: "paid",
+            outcome: "paid",
+            message: "Payment already verified",
+            orderId: order.orderId,
+        });
     }
     if (order.payment.status === "refunded") {
-        throw new AppError("This order was already refunded.", 400);
+        return res.status(200).json({
+            success: true,
+            status: "refunded",
+            outcome: "terminal",
+            message: "This order was already refunded.",
+            orderId: order.orderId,
+        });
     }
 
-    // 3. RECOVERY MODE — no triple, just the owned order: ask the gateway via
-    // the PROVIDER ADAPTER. Reconcile returns an EXPLICIT outcome; a lookup
-    // failure is UNKNOWN (never "unpaid"), so inventory is preserved.
     const hasTriple = razorpay_order_id || razorpay_payment_id || razorpay_signature;
-    if (!hasTriple) {
+
+    // 3. IF THE ORDER ALREADY HAS A RAZORPAY ORDER ID (or a verification triple):
+    // Reconcile with Razorpay FIRST before concluding expiry or failure!
+    // A payment captured before local expiry must be confirmed (or held if stock was released).
+    if (order.payment.razorpayOrderId) {
+        if (hasTriple) {
+            if (![razorpay_order_id, razorpay_payment_id, razorpay_signature].every(isPlainString)) {
+                throw new AppError("Invalid payment verification payload", 400);
+            }
+            if (order.payment.razorpayOrderId !== razorpay_order_id) {
+                console.warn(`[Verify] Order-mismatch attempt on ${order.orderId} from ${req.ip}`);
+                throw new AppError("Payment verification failed: order mismatch", 400);
+            }
+            if (!process.env.RAZORPAY_KEY_SECRET) {
+                throw new AppError("Payment gateway is not configured.", 500);
+            }
+            const generatedSignature = crypto
+                .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+                .update(razorpay_order_id + "|" + razorpay_payment_id)
+                .digest("hex");
+            if (!safeCompare(generatedSignature, razorpay_signature)) {
+                console.warn(`[Verify] Invalid signature attempt on ${order.orderId} from ${req.ip}`);
+                throw new AppError("Payment verification failed", 400);
+            }
+        }
+
         const rec = await reconcileOrderPayments(razorpayInstance, order.payment.razorpayOrderId, {
             expectedAmountPaise: toPaise(order.pricing.total),
             expectedCurrency: "INR",
+            expectedPaymentId: hasTriple ? razorpay_payment_id : undefined,
         });
-        if (rec.outcome !== RZP_OUTCOME.CAPTURED_VALID) {
-            // IN_PROGRESS / NO_CAPTURED / MISMATCH / UNKNOWN — never a failure here.
+
+        if (rec.outcome === RZP_OUTCOME.CAPTURED_VALID) {
+            const claimed = await confirmPaymentCaptured(order._id, {
+                paymentId: rec.payment.id,
+                amountPaise: rec.payment.amount,
+                source: hasTriple ? "browser-verify" : "gateway-recovery",
+            });
+            if (claimed) {
+                if (hasTriple) {
+                    await Order.updateOne({ _id: order._id }, { $set: { "payment.razorpaySignature": razorpay_signature } });
+                }
+                fulfillPaidOrder(claimed);
+                settleCartAfterPayment(claimed).catch(() => {});
+                return res.status(200).json({
+                    success: true,
+                    status: "paid",
+                    outcome: "paid",
+                    message: "Payment verified successfully",
+                    orderId: order.orderId,
+                });
+            }
+
+            const cur = await Order.findById(order._id);
+            if (cur?.fulfillmentHold?.active) {
+                return res.status(200).json({
+                    success: true,
+                    status: cur.payment?.status || "paid",
+                    outcome: "held",
+                    message: `Order is on hold for review: ${cur.fulfillmentHold.reason || "Review required"}`,
+                    orderId: order.orderId,
+                });
+            }
+            const st = cur?.payment?.status;
+            return res.status(200).json({
+                success: true,
+                status: st === "paid" ? "paid" : "pending",
+                outcome: st === "paid" ? "paid" : "verification_pending",
+                message: st === "paid" ? "Payment verified successfully" : "Payment is being confirmed. This page can be safely reloaded in a moment.",
+                orderId: order.orderId,
+            });
+        }
+
+        if (rec.outcome === RZP_OUTCOME.IN_PROGRESS) {
+            return res.status(200).json({
+                success: true,
+                status: "pending",
+                outcome: "verification_pending",
+                message: "Payment authorized at gateway; capture confirmation pending.",
+                orderId: order.orderId,
+            });
+        }
+
+        if (rec.outcome === RZP_OUTCOME.MISMATCH) {
+            await Order.updateOne(
+                { _id: order._id },
+                { $set: { "fulfillmentHold.active": true, "fulfillmentHold.reason": `Payment reconciliation mismatch: ${rec.reason}` } }
+            ).catch(() => {});
+            return res.status(200).json({
+                success: true,
+                status: "pending",
+                outcome: "held",
+                message: "Payment needs manual confirmation — the store has been alerted.",
+                orderId: order.orderId,
+            });
+        }
+
+        if (rec.outcome === RZP_OUTCOME.UNKNOWN) {
+            return res.status(200).json({
+                success: true,
+                status: "pending",
+                outcome: "verification_pending",
+                message: "Payment status is being reconciled with the gateway. Please retry in a moment.",
+                orderId: order.orderId,
+            });
+        }
+
+        // rec.outcome === RZP_OUTCOME.NO_CAPTURED:
+        // Razorpay confirms no payment was captured. NOW evaluate local terminal/expiry conditions:
+        if (order.status === "cancelled" || order.payment.status === "failed") {
+            return res.status(200).json({
+                success: true,
+                status: order.payment.status || "failed",
+                outcome: "terminal",
+                message: "This order has been cancelled or has expired.",
+                orderId: order.orderId,
+            });
+        }
+        if (order.fulfillmentHold?.active) {
             return res.status(200).json({
                 success: true,
                 status: order.payment.status,
-                message: rec.outcome === RZP_OUTCOME.MISMATCH
-                    ? "Payment needs manual confirmation — the store has been alerted."
-                    : "Payment not confirmed yet. If money was deducted it will be reconciled automatically.",
+                outcome: "held",
+                message: `Order is on hold for review: ${order.fulfillmentHold.reason || "Review required"}`,
+                orderId: order.orderId,
             });
         }
-        const claimed = await confirmPaymentCaptured(order._id, {
-            paymentId: rec.payment.id,
-            amountPaise: rec.payment.amount,
-            source: "gateway-recovery",
-        });
-        if (claimed) {
-            fulfillPaidOrder(claimed);
-            settleCartAfterPayment(claimed).catch(() => {});
-            return res.status(200).json({ success: true, status: "paid", message: "Payment verified successfully" });
+        if (order.reservation?.state === "released" || order.resourcesReleased) {
+            return res.status(200).json({
+                success: true,
+                status: "failed",
+                outcome: "terminal",
+                message: "Inventory reservation for this order has expired.",
+                orderId: order.orderId,
+            });
         }
-        const cur = await Order.findById(order._id);
-        return res.status(200).json({ success: true, status: cur?.payment?.status === "paid" ? "paid" : "pending", message: "Payment being confirmed." });
+        const isExpired = order.payment?.expiresAt && new Date(order.payment.expiresAt).getTime() <= Date.now();
+        if (isExpired) {
+            return res.status(200).json({
+                success: true,
+                status: "failed",
+                outcome: "terminal",
+                message: "Payment window for this order has expired.",
+                orderId: order.orderId,
+            });
+        }
+
+        // Within window and genuinely unpaid: payable
+        return res.status(200).json({
+            success: true,
+            status: "pending",
+            outcome: "payable",
+            razorpayOrderId: order.payment.razorpayOrderId,
+            amount: order.pricing.total,
+            currency: "INR",
+            key: process.env.RAZORPAY_KEY_ID,
+            orderId: order.orderId,
+            message: "Order is eligible for payment.",
+        });
     }
 
-    // 4. FULL VERIFY — every field must be a plain string (blocks operator
-    // payloads and the undefined-cast HMAC footgun).
-    if (![razorpay_order_id, razorpay_payment_id, razorpay_signature].every(isPlainString)) {
-        throw new AppError("Invalid payment verification payload", 400);
+    // 4. ORDER HAS NO GATEWAY ORDER ID (TASK 2):
+    // Check terminal/held conditions first:
+    if (order.status === "cancelled" || order.payment.status === "failed") {
+        return res.status(200).json({
+            success: true,
+            status: order.payment.status || "failed",
+            outcome: "terminal",
+            message: "This order has been cancelled or has expired.",
+            orderId: order.orderId,
+        });
+    }
+    if (order.fulfillmentHold?.active) {
+        return res.status(200).json({
+            success: true,
+            status: order.payment.status,
+            outcome: "held",
+            message: `Order is on hold for review: ${order.fulfillmentHold.reason || "Review required"}`,
+            orderId: order.orderId,
+        });
+    }
+    if (order.reservation?.state === "released" || order.resourcesReleased) {
+        return res.status(200).json({
+            success: true,
+            status: "failed",
+            outcome: "terminal",
+            message: "Inventory reservation for this order has expired.",
+            orderId: order.orderId,
+        });
+    }
+    const isExpiredNoGw = order.payment?.expiresAt && new Date(order.payment.expiresAt).getTime() <= Date.now();
+    if (isExpiredNoGw) {
+        return res.status(200).json({
+            success: true,
+            status: "failed",
+            outcome: "terminal",
+            message: "Payment window for this order has expired.",
+            orderId: order.orderId,
+        });
+    }
+    if (order.gatewayInit?.status === "manual_review") {
+        return res.status(200).json({
+            success: true,
+            status: "pending",
+            outcome: "held",
+            message: "Order initialization is held for review.",
+            orderId: order.orderId,
+        });
+    }
+    if (order.gatewayInit?.status === "failed") {
+        return res.status(200).json({
+            success: true,
+            status: "failed",
+            outcome: "terminal",
+            message: "Order initialization failed.",
+            orderId: order.orderId,
+        });
     }
 
-    // THE LINK CHECK: must be the rzp order THIS order was created with.
-    if (!order.payment.razorpayOrderId || order.payment.razorpayOrderId !== razorpay_order_id) {
-        // Reject WITHOUT touching the order — a forged/foreign triple must not
-        // fail a legitimate pending order or release its inventory.
-        console.warn(`[Verify] Order-mismatch attempt on ${order.orderId} from ${req.ip}`);
-        throw new AppError("Payment verification failed: order mismatch", 400);
+    // ELIGIBLE: Reconnect "preparing" to real gateway recovery using shared ensureGatewayOrder!
+    const gw = await ensureGatewayOrder(razorpayInstance, order);
+
+    if (gw.kind === "ready" && gw.razorpayOrderId) {
+        return res.status(200).json({
+            success: true,
+            status: "pending",
+            outcome: "payable",
+            razorpayOrderId: gw.razorpayOrderId,
+            amount: gw.order?.pricing?.total || order.pricing.total,
+            currency: "INR",
+            key: process.env.RAZORPAY_KEY_ID,
+            orderId: order.orderId,
+            message: "Order is eligible for payment.",
+        });
     }
 
-    if (!process.env.RAZORPAY_KEY_SECRET) {
-        throw new AppError("Payment gateway is not configured.", 500);
+    if (gw.kind === "in_progress") {
+        return res.status(200).json({
+            success: true,
+            status: "pending",
+            outcome: "preparing",
+            message: "Payment gateway initialization in progress. Please wait a moment.",
+            orderId: order.orderId,
+        });
     }
 
-    const generatedSignature = crypto
-        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-        .update(razorpay_order_id + "|" + razorpay_payment_id)
-        .digest("hex");
-
-    if (!safeCompare(generatedSignature, razorpay_signature)) {
-        // Same rule: bad signature mutates nothing.
-        console.warn(`[Verify] Invalid signature attempt on ${order.orderId} from ${req.ip}`);
-        throw new AppError("Payment verification failed", 400);
+    if (gw.kind === "uncertain") {
+        return res.status(200).json({
+            success: true,
+            status: "pending",
+            outcome: "verification_pending",
+            message: "Payment gateway status is pending confirmation.",
+            orderId: order.orderId,
+        });
     }
 
-    // 5. Signature proves the triple is genuine — NOT that money was captured.
-    // Confirm the specific payment against the gateway's OWN record via the
-    // provider adapter (items[] shape, integer paise, explicit outcome).
-    const rec = await reconcileOrderPayments(razorpayInstance, razorpay_order_id, {
-        expectedAmountPaise: toPaise(order.pricing.total),
-        expectedCurrency: "INR",
-        expectedPaymentId: razorpay_payment_id,
-    });
-    if (rec.outcome === RZP_OUTCOME.IN_PROGRESS) {
-        return res.status(200).json({ success: true, status: "pending", message: "Payment authorized; capture confirmation pending." });
-    }
-    if (rec.outcome !== RZP_OUTCOME.CAPTURED_VALID) {
-        console.warn(`[Verify] ${order.orderId} gateway outcome ${rec.outcome}${rec.reason ? ":" + rec.reason : ""} — leaving pending`);
-        return res.status(200).json({ success: true, status: "pending", message: "Payment confirmation pending. This page can be safely reloaded in a moment." });
-    }
-
-    // 6. ATOMIC capture confirmation via the SHARED transition. Concurrent
-    // webhooks funnel through the same conditional claim; follow-up fulfillment
-    // + email work is persisted in the same transaction.
-    const claimed = await confirmPaymentCaptured(order._id, {
-        paymentId: razorpay_payment_id,
-        amountPaise: rec.payment.amount,
-        source: "browser-verify",
-    });
-
-    if (claimed) {
-        await Order.updateOne({ _id: order._id }, { $set: { "payment.razorpaySignature": razorpay_signature } });
-        fulfillPaidOrder(claimed);
-        // Prepaid confirmation is authoritative: remove exactly the purchased
-        // QUANTITIES from the server cart (guest shadow user included).
-        settleCartAfterPayment(claimed).catch((e) => console.error(`[Verify] cart settle failed:`, e));
-        return res.status(200).json({ success: true, status: "paid", message: "Payment verified successfully" });
+    if (gw.kind === "rejected") {
+        if (gw.order?.fulfillmentHold?.active) {
+            return res.status(200).json({
+                success: true,
+                status: "pending",
+                outcome: "held",
+                message: "Order initialization is held for review.",
+                orderId: order.orderId,
+            });
+        }
+        return res.status(200).json({
+            success: true,
+            status: "failed",
+            outcome: "terminal",
+            message: gw.error?.message || gw.message || "Order initialization rejected.",
+            orderId: order.orderId,
+        });
     }
 
-    const cur = await Order.findById(order._id);
-    const st = cur?.payment?.status;
+    if (gw.kind === "terminal") {
+        return res.status(200).json({
+            success: true,
+            status: "failed",
+            outcome: "terminal",
+            message: gw.message || "Order is in a terminal state.",
+            orderId: order.orderId,
+        });
+    }
+
     return res.status(200).json({
         success: true,
-        status: st === "paid" ? "paid" : "pending",
-        message: st === "paid" ? "Payment verified successfully" : "Payment is being confirmed. This page can be safely reloaded in a moment.",
+        status: "pending",
+        outcome: "preparing",
+        message: "Payment gateway initialization in progress. Please wait a moment.",
+        orderId: order.orderId,
     });
 });
 
-async function settleCartAfterPayment(order) {
-    const user = await User.findById(order.user);
-    if (!user) return;
-    // Remove only the PURCHASED QUANTITIES, line by line — a product the customer
-    // re-added DURING payment keeps the extra units (fixes whole-line deletion).
-    const need = new Map();
-    for (const it of order.items) {
-        if (it.productId) need.set(String(it.productId), (need.get(String(it.productId)) || 0) + (it.quantity || 1));
-    }
-    const nextCart = [];
-    for (const line of user.cart) {
-        const obj = line && line.toObject ? line.toObject({ versionKey: false }) : { ...line };
-        const pid = String(obj.productId);
-        const remaining = need.get(pid) || 0;
-        if (remaining <= 0) { nextCart.push(obj); continue; }
-        const qty = obj.quantity || 1;
-        const take = Math.min(remaining, qty);
-        need.set(pid, remaining - take);
-        const left = qty - take;
-        if (left > 0) nextCart.push({ ...obj, quantity: left });
-    }
-    user.cart = nextCart;
-    await user.save();
-}
+
 
 // ---------------------------------------------------------------------------
 // POST /api/order/webhook — Razorpay server-to-server events.
@@ -1168,12 +1327,12 @@ const getUserOrders = asyncHandler(async (req, res) => {
     const skip = (page - 1) * limit;
 
     const [orders, total] = await Promise.all([
-        Order.find({ user: req.user._id })
+        Order.find({ user: req.user._id, isGuest: { $ne: true } })
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit)
             .select("-__v -payment.checkoutTokenHash -payment.razorpaySignature"),
-        Order.countDocuments({ user: req.user._id }),
+        Order.countDocuments({ user: req.user._id, isGuest: { $ne: true } }),
     ]);
 
     res.status(200).json({
@@ -1185,7 +1344,7 @@ const getUserOrders = asyncHandler(async (req, res) => {
 
 /** GET /api/order/:id — single order details (own order only) */
 const getOrderById = asyncHandler(async (req, res) => {
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
+    const order = await Order.findOne({ _id: req.params.id, user: req.user._id, isGuest: { $ne: true } })
         .populate("items.productId", "name mainImage")
         .select("-payment.checkoutTokenHash -payment.razorpaySignature");
 
@@ -1196,7 +1355,7 @@ const getOrderById = asyncHandler(async (req, res) => {
 
 /** GET /api/order/:id/track — live tracking (owner) */
 const trackOrder = asyncHandler(async (req, res) => {
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
+    const order = await Order.findOne({ _id: req.params.id, user: req.user._id, isGuest: { $ne: true } });
     if (!order) throw new AppError("Order not found", 404);
 
     // Single normalization layer with short cache + stored-status fallback, so a
@@ -1380,60 +1539,21 @@ const getAllOrders = asyncHandler(async (req, res) => {
 
 /** PUT /api/order/admin/:id/status — update order status */
 const updateOrderStatus = asyncHandler(async (req, res) => {
-    const { status, description } = req.body;
+    const { status, description, override, overrideReason } = req.body;
 
-    const VALID_STATUSES = [
-        "placed", "confirmed", "processing", "shipped",
-        "in_transit", "out_for_delivery", "delivered", "cancelled", "returned",
-    ];
-    if (typeof status !== "string" || !VALID_STATUSES.includes(status)) {
-        throw new AppError(`Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}`, 400);
-    }
-
-    const order = await Order.findById(req.params.id);
-    if (!order) throw new AppError("Order not found", 404);
-
-    // Terminal-state guard: cancelled/returned orders are frozen.
-    if (["cancelled", "returned"].includes(order.status) && order.status !== status) {
-        throw new AppError(`Order is already ${order.status} — terminal orders cannot transition.`, 400);
-    }
-
-    // Cancellation runs through the dedicated handler (courier cancel, refund,
-    // gated stock release); a raw status flip must never skip those.
-    if (status === "cancelled" && order.status !== "cancelled") {
+    // Cancellation runs through the dedicated handler (courier cancel, refund, gated stock release)
+    if (status === "cancelled") {
         return cancelOrder(req, res);
     }
 
-    // Physical return confirmed: a VERIFIED return restores eligible stock
-    // EXACTLY ONCE through the shared transition — no in-memory resourcesReleased
-    // reset (the forbidden pattern). Dispatched parcels (return_pending) restore;
-    // a held pre-dispatch reservation simply releases. Either way the original
-    // order is NOT re-opened.
-    if (status === "returned" && order.status !== "returned") {
-        await Order.updateOne(
-            { _id: order._id },
-            { $set: { status: "returned" }, $push: { timeline: { status: "Returned", description: description || "Physical return confirmed by the store", date: new Date() } } }
-        );
-        const restored = await confirmPhysicalReturn(order._id, { description: description || "Physical return confirmed by the store" });
-        if (!restored) await releaseReservation(order._id, { reason: "confirmed-return" });
-        const fresh = await Order.findById(order._id);
-        return res.status(200).json({ success: true, order: fresh });
-    }
-
-    order.status = status;
-    order.timeline.push({
-        status: status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " "),
-        description: description || `Order status updated to ${status}`,
-        date: new Date(),
+    const { order, changed } = await executeOrderTransition(req.params.id, status, {
+        description,
+        adminUser: req.admin,
+        isOverride: !!override,
+        overrideReason: overrideReason || (override ? description : ""),
     });
 
-    await order.save();
-
-    if (["shipped", "in_transit", "out_for_delivery", "delivered"].includes(status)) {
-        await enqueueShippingEmail(order._id, status);
-    }
-
-    res.status(200).json({ success: true, order });
+    res.status(200).json({ success: true, order, changed });
 });
 
 /**
@@ -1596,4 +1716,8 @@ export const __test = {
     STATUS_RANK,
     isPlainString,
     RESERVATION_WINDOW_MS,
+    // Checkout pre-flight contract: collection creation is fatal, index building
+    // is not. Asserted in tests/core-logic.test.js with fake models (no DB).
+    prepareCollection,
+    CHECKOUT_COLLECTION_MODELS,
 };

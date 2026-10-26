@@ -39,12 +39,8 @@ const updateProductRatingStats = async (productId) => {
  * Body: { rating, title, comment }
  */
 const createReview = asyncHandler(async (req, res) => {
-    console.log("createReview req.headers:", req.headers);
-    console.log("createReview req.body:", req.body);
-    console.log("createReview req.files:", req.files);
-    
     if (!req.body) {
-        throw new AppError("Request body is completely missing or not parsed properly. Content-Type: " + req.headers['content-type'], 400);
+        throw new AppError("Request body is missing", 400);
     }
     
     const body = req.body || {};

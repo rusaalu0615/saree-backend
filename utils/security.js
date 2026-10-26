@@ -68,3 +68,29 @@ export function pickSchemaFields(model, body = {}, extraAllowed = []) {
     }
     return out;
 }
+
+const SENSITIVE_KEY_PATTERN = /authorization|cookie|password|secret|checkoutToken|recoverySecret|token|otp|cvv|signature/i;
+
+/**
+ * Deep redaction of sensitive operational data for safe logging.
+ */
+export function redactSensitiveData(obj, depth = 0) {
+    if (depth > 5 || !obj) return obj;
+    if (typeof obj !== "object") return obj;
+
+    if (Array.isArray(obj)) {
+        return obj.map((item) => redactSensitiveData(item, depth + 1));
+    }
+
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+        if (SENSITIVE_KEY_PATTERN.test(k)) {
+            out[k] = "[REDACTED]";
+        } else if (v && typeof v === "object") {
+            out[k] = redactSensitiveData(v, depth + 1);
+        } else {
+            out[k] = v;
+        }
+    }
+    return out;
+}

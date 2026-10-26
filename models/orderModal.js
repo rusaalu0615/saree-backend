@@ -42,7 +42,7 @@ const orderSchema = new mongoose.Schema({
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",
-        required: true,
+        required: false,
     },
     items: [orderItemSchema],
     shippingAddress: shippingAddressSchema,
@@ -75,6 +75,27 @@ const orderSchema = new mongoose.Schema({
         // against Razorpay after this point and releases the hold if unpaid.
         expiresAt: Date,
     },
+    // Gateway order initialization tracking (spec §1)
+    gatewayInit: {
+        status: {
+            type: String,
+            enum: ["none", "initializing", "ready", "uncertain", "failed", "manual_review"],
+            default: "none",
+        },
+        claimToken: String,
+        claimExpiresAt: Date,
+        sentExternalCall: { type: Boolean, default: false },
+        intentAt: Date,
+        attempts: { type: Number, default: 0 },
+        lastError: String,
+        lastAttemptAt: Date,
+        nextAttemptAt: { type: Date, default: null },
+    },
+    // Cart settlement idempotency marker (spec §4)
+    cartSettled: { type: Boolean, default: false },
+    cartSettledAt: Date,
+    // Explicit guest ownership (spec §2)
+    isGuest: { type: Boolean, default: false },
     // Refund lifecycle — CLAIMED + RECONCILED work, not a fire-and-forget flag.
     // status only advances from gateway-verified state; `requested` is the
     // durable intent row claimed BEFORE any external call, so an initiation
@@ -229,6 +250,8 @@ orderSchema.index({ checkoutKey: 1 }, { unique: true, sparse: true });
 // Background recovery scans (all served by compound indexes, bounded batches)
 orderSchema.index({ "reservation.state": 1, "reservation.retryable": 1, "reservation.nextAttemptAt": 1 });
 orderSchema.index({ "fulfillment.stage": 1, "fulfillment.nextAttemptAt": 1 });
+orderSchema.index({ "gatewayInit.status": 1, "gatewayInit.claimExpiresAt": 1 });
+orderSchema.index({ "payment.status": 1, "gatewayInit.nextAttemptAt": 1, createdAt: 1 });
 orderSchema.index({ "cancellation.status": 1 });
 
 export default mongoose.model("Order", orderSchema);

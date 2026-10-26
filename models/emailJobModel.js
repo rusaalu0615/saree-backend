@@ -34,6 +34,7 @@ const emailJobSchema = new mongoose.Schema({
     maxAttempts: { type: Number, default: 6 },
     nextAttemptAt: { type: Date, default: Date.now },
     leaseOwner: String,
+    claimToken: { type: String, index: true },
     leaseExpiresAt: Date,
     lastError: String,
     sentAt: Date,

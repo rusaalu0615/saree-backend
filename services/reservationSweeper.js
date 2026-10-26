@@ -45,10 +45,11 @@ import {
 } from "../services/orderLifecycle.js";
 import { runFulfillmentSweep } from "../services/fulfillmentWorker.js";
 import { runEmailSweep } from "../services/emailWorker.js";
+import { settleCartAfterPayment } from "../services/cartSettlement.js";
+import { findExistingGatewayOrder, GATEWAY_LOOKUP_OUTCOME } from "../services/gatewayOrder.js";
 
 const {
     processWebhookEventDoc,
-    settleCartAfterPayment,
     RESERVATION_WINDOW_MS,
 } = __lifecycle;
 
@@ -147,23 +148,89 @@ async function reconcilePendingPayments() {
         await sleep(20);
     }
 
-    // (b) Prepaid orders with NO gateway id at all — nothing can ever be
-    //     captured, so expire + release once past the window.
+    // (b) Prepaid orders with NO gateway id at all
     const orphanPending = await Order.find({
         "payment.method": { $ne: "cod" },
         "payment.status": "pending",
         "payment.razorpayOrderId": { $in: [null, undefined, ""] },
         "reservation.state": { $in: ["held", "release_requested"] },
         "fulfillmentHold.active": { $ne: true },
+        $or: [
+            { "gatewayInit.nextAttemptAt": { $lte: new Date() } },
+            { "gatewayInit.nextAttemptAt": { $exists: false } },
+            { "gatewayInit.nextAttemptAt": null },
+        ],
         createdAt: { $lte: cutoff },
     })
-        .sort({ createdAt: 1 })
+        .sort({ "gatewayInit.nextAttemptAt": 1, createdAt: 1 })
         .limit(BATCH)
-        .select("_id orderId")
+        .select("_id orderId pricing gatewayInit createdAt payment")
         .lean();
 
     for (const doc of orphanPending) {
         try {
+            // Check if an external call was ever sent to Razorpay
+            if (doc.gatewayInit?.sentExternalCall) {
+                // An external order creation was dispatched! Reconcile with Razorpay first
+                const lookup = await findExistingGatewayOrder(razorpayInstance, doc);
+
+                if (lookup.outcome === GATEWAY_LOOKUP_OUTCOME.FOUND) {
+                    // Gateway order exists! Link it so normal payment reconciliation can evaluate it
+                    console.log(`[Sweeper] Reconciled remote gateway order ${lookup.razorpayOrderId} for ${doc.orderId}`);
+                    await Order.updateOne(
+                        { _id: doc._id, "payment.razorpayOrderId": { $in: [null, undefined, ""] } },
+                        {
+                            $set: {
+                                "payment.razorpayOrderId": lookup.razorpayOrderId,
+                                "gatewayInit.status": "ready",
+                                "gatewayInit.claimToken": null,
+                                "gatewayInit.claimExpiresAt": null,
+                                "gatewayInit.nextAttemptAt": null,
+                            },
+                        }
+                    );
+                    // Do not expire! Next tick or immediate reconciliation will handle it
+                    continue;
+                }
+
+                if (lookup.outcome === GATEWAY_LOOKUP_OUTCOME.MISMATCH) {
+                    // Mismatch between gateway and local order details: place on fulfillment hold
+                    console.error(`[Sweeper] MISMATCH for ${doc.orderId} during orphan reconciliation (${lookup.reason}) — held for review`);
+                    await Order.updateOne(
+                        { _id: doc._id },
+                        {
+                            $set: {
+                                "gatewayInit.status": "manual_review",
+                                "gatewayInit.nextAttemptAt": null,
+                                "fulfillmentHold.active": true,
+                                "fulfillmentHold.reason": `Gateway order mismatch: ${lookup.reason}`,
+                            },
+                        }
+                    );
+                    continue;
+                }
+
+                if (lookup.outcome === GATEWAY_LOOKUP_OUTCOME.UNKNOWN) {
+                    // Remote status is uncertain (timeout, network, or visibility window): backoff and retry later, do NOT release inventory!
+                    const nextAttempt = backoffDate(Math.min((doc.gatewayInit?.attempts || 1), 5));
+                    await Order.updateOne(
+                        { _id: doc._id },
+                        {
+                            $set: {
+                                "gatewayInit.status": "uncertain",
+                                "gatewayInit.nextAttemptAt": nextAttempt,
+                            },
+                            $inc: { "gatewayInit.attempts": 1 },
+                        }
+                    );
+                    console.warn(`[Sweeper] Unresolved gateway state for ${doc.orderId}; preserved reservation, retry at ${nextAttempt.toISOString()}`);
+                    continue;
+                }
+
+                // If outcome === CONFIRMED_ABSENT, external creation definitively never existed or was abandoned
+            }
+
+            // Genuine abandoned attempt with no external creation: conditionally expire & release
             const won = await expirePendingPayment(doc._id);
             if (won) {
                 await releaseReservation(doc._id, { reason: "no-gateway-order-expired" });
@@ -362,22 +429,56 @@ async function reconcileRefunds() {
     }
 }
 
+async function reconcileUnsettledPaidCarts() {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000); // 7-day conservative limit
+
+    // Mark legacy orders older than 7 days as settled without touching current user cart
+    await Order.updateMany(
+        {
+            "payment.status": "paid",
+            createdAt: { $lt: cutoff },
+            $or: [{ cartSettled: false }, { cartSettled: { $exists: false } }],
+        },
+        { $set: { cartSettled: true, cartSettledAt: new Date() } }
+    ).catch(() => {});
+
+    const unsettled = await Order.find({
+        "payment.status": "paid",
+        createdAt: { $gte: cutoff },
+        $or: [{ cartSettled: false }, { cartSettled: { $exists: false } }],
+    })
+        .limit(BATCH)
+        .select("_id orderId user isGuest cartSettled items createdAt")
+        .lean();
+
+    for (const doc of unsettled) {
+        try {
+            await settleCartAfterPayment(doc, { caller: "sweeper" });
+        } catch (e) {
+            console.error(`[Sweeper] Cart settle recovery failed for ${doc.orderId}:`, e.message);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Single guarded tick — never allows overlapping runs IN THIS PROCESS; every
 // sweep above is also claim-safe ACROSS processes.
+// Isolated error boundaries ensure email delivery or payment recovery are NEVER
+// blocked by an earlier step failing.
 // ---------------------------------------------------------------------------
 async function runSweepOnce() {
     if (running) return;
     if (mongoose.connection.readyState !== 1) return; // DB not ready
     running = true;
     try {
-        await reconcilePendingPayments();
-        await reconcileExpiredUnreleased();
-        await retryFailedReleases();
-        await replayWebhookEvents();
-        await runFulfillmentSweep(BATCH);
-        await reconcileRefunds();
-        await runEmailSweep(BATCH);
+        try { await reconcilePendingPayments(); } catch (e) { console.error("[Sweeper] reconcilePendingPayments error:", e.message); }
+        try { await reconcileExpiredUnreleased(); } catch (e) { console.error("[Sweeper] reconcileExpiredUnreleased error:", e.message); }
+        try { await retryFailedReleases(); } catch (e) { console.error("[Sweeper] retryFailedReleases error:", e.message); }
+        try { await replayWebhookEvents(); } catch (e) { console.error("[Sweeper] replayWebhookEvents error:", e.message); }
+        try { await reconcileUnsettledPaidCarts(); } catch (e) { console.error("[Sweeper] reconcileUnsettledPaidCarts error:", e.message); }
+        try { await runFulfillmentSweep(BATCH); } catch (e) { console.error("[Sweeper] runFulfillmentSweep error:", e.message); }
+        try { await reconcileRefunds(); } catch (e) { console.error("[Sweeper] reconcileRefunds error:", e.message); }
+        try { await runEmailSweep(BATCH); } catch (e) { console.error("[Sweeper] runEmailSweep error:", e.message); }
     } catch (err) {
         console.error("[Sweeper] tick error:", err.message);
     } finally {

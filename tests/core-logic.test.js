@@ -29,6 +29,7 @@ import {
 } from "../services/razorpayProvider.js";
 
 const { mapShipmentStatus, sanitizeTrackingForPublic, eventEntity, STATUS_RANK } = __test;
+const { prepareCollection, CHECKOUT_COLLECTION_MODELS } = __test;
 
 // ---------------------------------------------------------------------------
 // Money helpers — the whole checkout runs on INTEGER PAISE to kill float drift.

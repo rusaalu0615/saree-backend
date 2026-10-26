@@ -9,8 +9,10 @@ import indexRoutes from "./routes/index.js";
 import categoryBannerRoutes from "./routes/categoryBannerRoutes.js";
 import { startReservationSweeper } from "./services/reservationSweeper.js";
 import { globalLimiter } from "./middlewares/rateLimiter.js";
-import { csrfGuard } from "./middlewares/csrfGuard.js";
 import AppError from "./utils/AppError.js";
+import { verifyDatabaseReadiness, getReadinessStatus } from "./config/indexReadiness.js";
+import { verifyEmailConfig } from "./services/emailService.js";
+import { csrfGuard } from "./middlewares/csrfGuard.js";
 
 import path from "path";
 import { fileURLToPath } from "url";
@@ -140,8 +142,41 @@ app.get("/", (req, res) => {
     });
 });
 
+// Liveness probe (process is alive)
 app.get("/health", (req, res) => {
     res.json({ status: "healthy", uptime: process.uptime() });
+});
+
+// Readiness probe (critical database uniqueness & collections verified)
+app.get("/health/readiness", (req, res) => {
+    const readiness = getReadinessStatus();
+    if (!readiness.isReady) {
+        return res.status(503).json({
+            status: "not_ready",
+            checkedAt: readiness.checkedAt,
+            errors: readiness.errors,
+            warnings: readiness.warnings,
+        });
+    }
+    res.status(200).json({
+        status: "ready",
+        checkedAt: readiness.checkedAt,
+        warnings: readiness.warnings,
+    });
+});
+
+// Database readiness guard: gate business endpoints with 503 if critical uniqueness checks failed
+app.use("/api", (req, res, next) => {
+    const readiness = getReadinessStatus();
+    if (!readiness.isReady) {
+        return res.status(503).json({
+            success: false,
+            code: "DATABASE_NOT_READY",
+            message: "The store database is currently preparing critical indexes or undergoing migration. Business operations are temporarily gated.",
+            errors: !isProduction ? readiness.errors : undefined,
+        });
+    }
+    next();
 });
 
 // Routes
@@ -170,19 +205,31 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
     try {
         await connectDB();
+        const readiness = await verifyDatabaseReadiness();
+        // Check email configuration (non-blocking for DB readiness)
+        await verifyEmailConfig().catch((e) => console.warn("[Startup] Email config check:", e.message));
+
+        if (!readiness.isReady) {
+            console.error("[Startup] CRITICAL DATABASE READINESS CHECK FAILED:");
+            readiness.errors.forEach((err) => console.error("  -", err));
+            if (isProduction) {
+                console.error("[Startup] Aborting startup in production because critical uniqueness constraints are missing.");
+                process.exit(1);
+            }
+        }
 
         app.listen(PORT, () => {
             console.log(`Server is running on port ${PORT}`);
-            // Internal recovery job — expires abandoned reservations, replays
-            // unprocessed webhooks, and resumes stalled fulfillment pipelines.
-            // Runs in every process because every stage is DB-guarded, but a
-            // multi-instance deploy should enable it on exactly one worker.
-            if (process.env.ENABLE_SWEEPER !== "false") {
+            // Do NOT start mutation workers against an unready database!
+            if (readiness.isReady && process.env.ENABLE_SWEEPER !== "false") {
                 startReservationSweeper();
+            } else if (!readiness.isReady) {
+                console.warn("[Startup] Reservation sweeper NOT started: database readiness checks failed.");
             }
         });
     } catch (error) {
         console.error("Server startup failed:", error);
+        process.exit(1);
     }
 };
 

@@ -112,6 +112,9 @@ export async function confirmPaymentCaptured(orderId, { paymentId, amountPaise, 
         const set = {
             "payment.status": "paid",
             "payment.amountPaid": amountPaise,
+            "gatewayInit.nextAttemptAt": null,
+            "gatewayInit.claimToken": null,
+            "gatewayInit.claimExpiresAt": null,
         };
         if (paymentId) set["payment.razorpayPaymentId"] = paymentId;
 
@@ -185,7 +188,12 @@ export async function expirePendingPayment(orderId) {
     const res = await Order.updateOne(
         { _id: orderId, "payment.status": "pending" },
         {
-            $set: { "payment.status": "failed" },
+            $set: {
+                "payment.status": "failed",
+                "gatewayInit.nextAttemptAt": null,
+                "gatewayInit.claimToken": null,
+                "gatewayInit.claimExpiresAt": null,
+            },
             $push: { timeline: { status: "Payment Expired", description: "No captured payment within the reservation window.", date: new Date() } },
         }
     );
@@ -335,40 +343,60 @@ export async function markDispatched(orderId) {
  * resourcesReleased in memory.
  * @returns {boolean} true if this call performed the one-time restoration.
  */
-export async function confirmPhysicalReturn(orderId, { description = "Physical return confirmed" } = {}) {
-    try {
-        return await withTransaction(async (session) => {
-            const order = await Order.findOne({ _id: orderId, "reservation.state": "return_pending" }).session(session);
-            if (!order) return false;
+export async function confirmPhysicalReturn(orderId, { description = "Physical return confirmed", session: passedSession } = {}) {
+    const runInSession = async (session) => {
+        const order = await Order.findById(orderId).session(session);
+        if (!order) return { success: false, reason: "not_found" };
 
-            // Atomic exactly-once claim on the return marker.
-            const claimed = await Order.findOneAndUpdate(
-                { _id: orderId, "reservation.state": "return_pending", "returnInfo.stockRestored": { $ne: true } },
-                { $set: { "returnInfo.status": "confirmed", "returnInfo.confirmedAt": new Date(), "returnInfo.stockRestored": true, "reservation.state": "return_restored", "reservation.releasedAt": new Date(), resourcesReleased: true, resourcesReleasedAt: new Date() }, $push: { timeline: { status: "Returned — Stock Restored", description, date: new Date() } } },
-                { new: true, session }
-            );
-            if (!claimed) return false;
+        if (order.returnInfo?.stockRestored || order.reservation?.state === "return_restored" || order.reservation?.state === "released") {
+            return { success: true, alreadyRestored: true };
+        }
 
-            const increments = (claimed.items || [])
-                .filter((it) => it.productId)
-                .map((it) => ({ updateOne: { filter: { _id: it.productId }, update: { $inc: { stock: it.quantity } } } }));
-            if (increments.length) await Product.bulkWrite(increments, { session });
+        // Atomic exactly-once claim on the return marker.
+        const claimed = await Order.findOneAndUpdate(
+            { _id: orderId, "returnInfo.stockRestored": { $ne: true } },
+            {
+                $set: {
+                    "returnInfo.status": "confirmed",
+                    "returnInfo.confirmedAt": new Date(),
+                    "returnInfo.stockRestored": true,
+                    "reservation.state": "return_restored",
+                    "reservation.releasedAt": new Date(),
+                    resourcesReleased: true,
+                    resourcesReleasedAt: new Date(),
+                },
+                $push: { timeline: { status: "Returned — Stock Restored", description, date: new Date() } },
+            },
+            { new: true, session }
+        );
+        if (!claimed) return { success: true, alreadyRestored: true };
 
-            // The coupon claim of THIS order is also handed back once.
-            if (claimed.pricing?.couponCode) {
-                const coupon = await Coupon.findOne({ code: claimed.pricing.couponCode }).session(session);
-                if (coupon) {
-                    const idx = coupon.usedBy.findIndex((uid) => uid.toString() === claimed.user?.toString());
-                    if (idx !== -1) coupon.usedBy.splice(idx, 1);
-                    coupon.usedCount = clampNonNeg(coupon.usedCount - 1);
-                    await coupon.save({ session });
-                }
+        const increments = (claimed.items || [])
+            .filter((it) => it.productId)
+            .map((it) => ({ updateOne: { filter: { _id: it.productId }, update: { $inc: { stock: it.quantity } } } }));
+        if (increments.length) await Product.bulkWrite(increments, { session });
+
+        // The coupon claim of THIS order is also handed back once.
+        if (claimed.pricing?.couponCode) {
+            const coupon = await Coupon.findOne({ code: claimed.pricing.couponCode }).session(session);
+            if (coupon) {
+                const idx = coupon.usedBy.findIndex((uid) => uid.toString() === claimed.user?.toString());
+                if (idx !== -1) coupon.usedBy.splice(idx, 1);
+                coupon.usedCount = clampNonNeg(coupon.usedCount - 1);
+                await coupon.save({ session });
             }
-            return true;
-        });
+        }
+        return { success: true, alreadyRestored: false };
+    };
+
+    if (passedSession) {
+        return await runInSession(passedSession);
+    }
+    try {
+        return await withTransaction(runInSession);
     } catch (err) {
         console.error(`[Lifecycle] confirmPhysicalReturn failed for ${orderId}:`, err.message);
-        return false;
+        throw err;
     }
 }
 
@@ -556,7 +584,7 @@ export async function adoptGatewayRefund(orderId, { refundId, amountPaise, gatew
 // EMAIL OUTBOX — enqueue is part of success transitions, delivery is a worker
 // ===========================================================================
 
-async function enqueueEmails(order, session) {
+export async function enqueueEmails(order, session) {
     const jobs = [
         { dedupeKey: `confirm:${order._id}`, kind: "order_confirmation", order: order._id },
         { dedupeKey: `admin:${order._id}`, kind: "admin_order_notification", order: order._id },
@@ -567,12 +595,12 @@ async function enqueueEmails(order, session) {
 }
 
 /** Queue a shipping/status update email (idempotent per order+status). */
-export async function enqueueShippingEmail(orderId, status) {
-    await EmailJob.updateOne(
+export async function enqueueShippingEmail(orderId, status, { session } = {}) {
+    return await EmailJob.updateOne(
         { dedupeKey: `ship:${orderId}:${status}` },
         { $setOnInsert: { kind: "shipping_update", order: orderId, statusParam: status, state: "queued", nextAttemptAt: new Date() } },
-        { upsert: true }
-    ).catch((err) => console.error(`[Lifecycle] shipping email enqueue failed:`, err.message));
+        { upsert: true, session }
+    );
 }
 
 /**
