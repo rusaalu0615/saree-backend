@@ -425,7 +425,7 @@ async function reconcileRefunds() {
                 { _id: doc._id },
                 { $set: { "refund.nextAttemptAt": backoffDate(doc.refund?.attempts || 1), "refund.lastError": String(err.message || err).slice(0, 500) } }
             ).catch(() => {});
-            console.error(`[Sweeper] refund reconcile error for ${doc.orderId}:`, err.message);
+            console.error(`[Sweeper] refund reconcile error for ${doc.orderId}:`, err?.message || err?.error?.description || err);
         }
         await sleep(20);
     }
