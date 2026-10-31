@@ -104,11 +104,12 @@ const registerUser = asyncHandler(async (req, res) => {
 
     const token = generateToken(user._id);
 
-    // Set secure, HttpOnly, SameSite=None cookie for XSS protection
+    // Set secure, HttpOnly cookie for XSS protection
+    const isProduction = process.env.NODE_ENV === "production";
     res.cookie("auth_token", token, {
         httpOnly: true,
-        secure: true,
-        sameSite: "none",
+        secure: isProduction,
+        sameSite: isProduction ? "none" : "lax",
         maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 
@@ -149,11 +150,12 @@ const loginUser = asyncHandler(async (req, res) => {
 
     const token = generateToken(user._id);
 
-    // Set secure, HttpOnly, SameSite=None cookie for XSS protection
+    // Set secure, HttpOnly cookie for XSS protection
+    const isProduction = process.env.NODE_ENV === "production";
     res.cookie("auth_token", token, {
         httpOnly: true,
-        secure: true,
-        sameSite: "none",
+        secure: isProduction,
+        sameSite: isProduction ? "none" : "lax",
         maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 
@@ -322,10 +324,11 @@ const logoutUser = asyncHandler(async (req, res) => {
         // Invalid/expired token — nothing to revoke; still clear the cookie below.
     }
 
+    const isProduction = process.env.NODE_ENV === "production";
     res.cookie("auth_token", "", {
         httpOnly: true,
-        secure: true,
-        sameSite: "none",
+        secure: isProduction,
+        sameSite: isProduction ? "none" : "lax",
         expires: new Date(0) // Expire immediately
     });
     res.status(200).json({ message: "Logged out successfully" });
