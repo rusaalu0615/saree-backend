@@ -153,7 +153,7 @@ const createOrderSchema = z.object({
         )
         .min(1, "Order must contain at least one item"),
     shippingAddress: shippingAddressSchema,
-    paymentMethod: z.enum(["card", "upi", "cod", "prepaid"]).optional().default("cod"),
+    paymentMethod: z.enum(["card", "upi", "wallet", "cod", "prepaid"]).optional().default("cod"),
     couponCode: z.string().trim().optional(),
     // Client-generated retry key for this checkout attempt (uuid-like). Same
     // key + same payload replays the original order instead of creating a

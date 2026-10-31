@@ -49,7 +49,7 @@ const orderSchema = new mongoose.Schema({
     payment: {
         method: {
             type: String,
-            enum: ["cod", "prepaid", "upi", "card"],
+            enum: ["cod", "prepaid", "upi", "card", "wallet"],
             default: "cod",
         },
         status: {
