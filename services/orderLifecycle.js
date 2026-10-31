@@ -313,12 +313,46 @@ export async function releaseReservation(orderId, { reason = "order-failed" } = 
         }
         return { released: false, retryable: false, reason: "concurrent_release" };
     } catch (err) {
-        // Retain durable retry work on a genuine transaction/infra failure.
         console.error(`[Lifecycle] releaseReservation transaction failed for ${orderId}:`, err.message);
-        await Order.updateOne(
-            { _id: orderId },
-            { $set: { "reservation.state": "release_requested", "reservation.retryable": true, "reservation.lastError": String(err.message || err).slice(0, 400), "reservation.nextAttemptAt": backoffDate(order.reservation?.attempts) }, $inc: { "reservation.attempts": 1 } }
-        ).catch(() => {});
+        // Conditional error recovery: ONLY update if reservation.state is still "held" or "release_requested".
+        // NEVER overwrite or downgrade "released", "return_pending", or "return_restored"!
+        const recoveryUpdate = await Order.updateOne(
+            {
+                _id: orderId,
+                "reservation.state": { $in: ["held", "release_requested"] },
+                $or: [
+                    { "payment.status": { $in: ["pending", "failed", "refunded"] } },
+                    { "cancellation.status": { $in: ["requested", "completed"] } },
+                ],
+            },
+            {
+                $set: {
+                    "reservation.state": "release_requested",
+                    "reservation.retryable": true,
+                    "reservation.lastError": String(err.message || err).slice(0, 400),
+                    "reservation.nextAttemptAt": backoffDate(order.reservation?.attempts),
+                },
+                $inc: { "reservation.attempts": 1 },
+            }
+        ).catch((uErr) => {
+            console.error(`[Lifecycle] releaseReservation retry update failed for ${orderId}:`, uErr.message);
+        });
+
+        if (!recoveryUpdate || recoveryUpdate.modifiedCount !== 1) {
+            // Conditional update did not match: re-read and classify current business state
+            const fresh = await Order.findById(orderId).select("payment.status cancellation.status reservation.state").lean();
+            const freshState = fresh?.reservation?.state;
+            if (freshState === "released" || freshState === "return_restored") {
+                return { released: false, retryable: false, reason: "already_released" };
+            }
+            if (freshState === "return_pending") {
+                return { released: false, retryable: false, reason: "dispatched_awaiting_return" };
+            }
+            if (!isEligible(fresh)) {
+                return { released: false, retryable: false, reason: "paid_keep_hold" };
+            }
+        }
+
         return { released: false, retryable: true, reason: "transaction_failed" };
     }
 }
@@ -328,10 +362,12 @@ export async function releaseReservation(orderId, { reason = "order-failed" } = 
  * be auto-released — only a verified return restores it. Called by fulfillment
  * once pickup is confirmed / the courier reports dispatch.
  */
-export async function markDispatched(orderId) {
+export async function markDispatched(orderId, { session } = {}) {
+    const opts = session ? { session } : {};
     const res = await Order.updateOne(
         { _id: orderId, "reservation.state": "held" },
-        { $set: { "reservation.state": "return_pending" } }
+        { $set: { "reservation.state": "return_pending" } },
+        opts
     );
     return res.modifiedCount === 1;
 }
@@ -505,14 +541,11 @@ export async function finalizeRefundState(orderId, { providerStatus, leaseOwner 
     if (providerStatus === "processed") {
         return withTransaction(async (session) => {
             // Read the authoritative refund/payment figures inside the txn.
-            const order = await Order.findOne(
-                {
-                    _id: orderId,
-                    "refund.razorpayRefundId": { $exists: true, $ne: null },
-                    "refund.finalized": { $ne: true },
-                },
-                { session }
-            );
+            const order = await Order.findOne({
+                _id: orderId,
+                "refund.razorpayRefundId": { $exists: true, $ne: null },
+                "refund.finalized": { $ne: true },
+            }).session(session);
             if (!order) return false;
 
             const refundAmount = clampNonNeg(order.refund.amountPaise || order.refund.requestedAmountPaise || 0);

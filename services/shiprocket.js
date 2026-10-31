@@ -280,13 +280,45 @@ async function trackByShiprocketOrderId(shiprocketOrderId) {
 }
 
 /**
- * Cancel a Shiprocket order
+ * Cancel a Shiprocket order and classify provider outcome explicitly:
+ * Returns: { outcome: "confirmed" | "failed" | "uncertain", statusCode?: number, message?: string, raw?: any, error?: string }
  */
 async function cancelShiprocketOrder(shiprocketOrderIds) {
-    return await shiprocketFetch("/orders/cancel", {
-        method: "POST",
-        body: JSON.stringify({ ids: [shiprocketOrderIds] }),
-    });
+    if (!shiprocketOrderIds) {
+        return { outcome: "failed", message: "no_shiprocket_order_id" };
+    }
+    const id = Array.isArray(shiprocketOrderIds) ? shiprocketOrderIds[0] : shiprocketOrderIds;
+    let data;
+    try {
+        data = await shiprocketFetch("/orders/cancel", {
+            method: "POST",
+            body: JSON.stringify({ ids: [id] }),
+        });
+    } catch (err) {
+        const msg = String(err.message || err);
+        // Distinguish definite rejections (e.g. 400/404/422/already shipped) from uncertain network/timeout errors
+        const isTransient = /timeout|network|socket|econn|etimedout|abort|fetch failed|5\d\d/i.test(msg);
+        if (isTransient) {
+            return { outcome: "uncertain", error: msg };
+        }
+        return { outcome: "failed", error: msg };
+    }
+
+    // Inspect response: Shiprocket can return HTTP 200 with status_code: 400 or message indicating failure
+    const statusCode = data?.status_code ?? data?.status ?? 200;
+    const msg = String(data?.message || data?.errors || "");
+    const isSuccessCode = statusCode === 200 || statusCode === 204;
+    const isSuccessMessage = /cancelled successfully|order cancelled/i.test(msg);
+    const isRejectMessage = /cannot be cancelled|already shipped|already delivered|not found|invalid/i.test(msg);
+
+    if (isSuccessCode && !isRejectMessage) {
+        return { outcome: "confirmed", statusCode, message: msg, raw: data };
+    }
+    if (isRejectMessage || (statusCode >= 400 && statusCode < 500)) {
+        return { outcome: "failed", statusCode, message: msg, raw: data };
+    }
+
+    return { outcome: "uncertain", statusCode, message: msg, raw: data };
 }
 
 /**

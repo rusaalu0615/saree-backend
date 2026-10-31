@@ -25,6 +25,8 @@ import {
 import { RZP_OUTCOME } from "../services/razorpayProvider.js";
 
 import Order from "../models/orderModal.js";
+import { buildCheckoutOrderResponse, __test as orderControllerTest } from "../controllers/orderController.js";
+const { decidePaymentReconciliationOutcome } = orderControllerTest;
 
 import {
     calculateRemainingCart,
@@ -875,5 +877,211 @@ test("verifyDatabaseReadiness checks real transaction support and required colle
     const isReplicaSetError = /replica set|Transaction numbers are only allowed|not enabled/i.test(standaloneErrorMsg);
     assert.equal(isReplicaSetError, true, "Must recognize MongoDB standalone error and provide replica set setup instructions");
 });
+
+// ===========================================================================
+// 21. TASK 1: PAYMENT AMOUNT UNITS & ZERO-PAYABLE CONTRACT
+// ===========================================================================
+
+test("TASK 1: buildCheckoutOrderResponse consistently returns integer paise across standard, decimal, and zero amounts", () => {
+    // 1. Standard ₹1,200 must return 120000 paise
+    const stdOrder = {
+        orderId: "ORD-STD-1200",
+        _id: "order_id_1200",
+        status: "placed",
+        payment: { method: "card", status: "pending", razorpayOrderId: "order_rzp_1200" },
+        pricing: { total: 1200 },
+        fulfillmentHold: { active: false },
+    };
+    const stdResp = buildCheckoutOrderResponse(stdOrder, "token_123");
+    assert.equal(stdResp.payablePaise, 120000, "₹1,200 must convert to 120000 paise");
+    assert.equal(stdResp.amount, 120000);
+    assert.equal(stdResp.requiresPayment, true);
+    assert.equal(stdResp.outcome, "awaiting_payment");
+
+    // 2. Decimal ₹1,200.50 must return 120050 paise without floating point drift
+    const decOrder = {
+        ...stdOrder,
+        orderId: "ORD-DEC-120050",
+        pricing: { total: 1200.50 },
+    };
+    const decResp = buildCheckoutOrderResponse(decOrder, "token_dec");
+    assert.equal(decResp.payablePaise, 120050, "₹1,200.50 must convert to 120050 paise");
+    assert.equal(decResp.amount, 120050);
+
+    // 3. Zero-payable order (₹0) must be settled and requiresPayment = false
+    const zeroOrder = {
+        ...stdOrder,
+        orderId: "ORD-ZERO-0",
+        pricing: { total: 0 },
+        payment: { method: "prepaid", status: "pending", razorpayOrderId: null },
+    };
+    const zeroResp = buildCheckoutOrderResponse(zeroOrder, "token_zero");
+    assert.equal(zeroResp.payablePaise, 0);
+    assert.equal(zeroResp.requiresPayment, false);
+    assert.equal(zeroResp.settled, true);
+    assert.equal(zeroResp.outcome, "paid_settled");
+});
+
+// ===========================================================================
+// 22. TASK 4: UNKNOWN GATEWAY INITIALIZATION & EXPIRY GUARDS
+// ===========================================================================
+
+test("TASK 4: ensureGatewayOrder refuses to call orders.create if order reservation has expired or been released", async () => {
+    let createCalled = false;
+    const mockRazorpay = {
+        orders: {
+            all: async () => ({ items: [], count: 0 }),
+            create: async () => {
+                createCalled = true;
+                return { id: "order_rzp_illegal" };
+            },
+        },
+    };
+
+    // Expired payment window without existing gateway order
+    const expiredOrder = {
+        _id: "507f191e810c19729de860ea",
+        orderId: "ORD-EXP-1",
+        payment: {
+            method: "card",
+            status: "pending",
+            razorpayOrderId: null,
+            expiresAt: new Date(Date.now() - 60000), // expired 1 min ago
+        },
+        pricing: { total: 1200 },
+        reservation: { state: "held" },
+        gatewayInit: { status: "none", sentExternalCall: false },
+        status: "placed",
+    };
+
+    const res1 = await ensureGatewayOrder(mockRazorpay, expiredOrder);
+    assert.equal(res1.kind, GATEWAY_RESULT_KIND.TERMINAL);
+    assert.equal(createCalled, false, "Must never call orders.create for an expired order");
+
+    // Released reservation
+    const releasedOrder = {
+        ...expiredOrder,
+        payment: { ...expiredOrder.payment, expiresAt: new Date(Date.now() + 600000) },
+        reservation: { state: "released" },
+    };
+    const res2 = await ensureGatewayOrder(mockRazorpay, releasedOrder);
+    assert.equal(res2.kind, GATEWAY_RESULT_KIND.TERMINAL);
+    assert.equal(createCalled, false, "Must never call orders.create when reservation was released");
+});
+
+test("TASK 4: findExistingGatewayOrder with sentExternalCall returns UNKNOWN when pagination exhausted rather than falsely confirming absent", async () => {
+    const mockOrder = {
+        _id: "order_recon_1",
+        orderId: "ORD-SENT-CALL-1",
+        payment: { method: "card", status: "pending", razorpayOrderId: null },
+        pricing: { total: 1200 },
+        gatewayInit: { status: "initializing", sentExternalCall: true },
+    };
+
+    const mockRazorpayEmpty = {
+        orders: {
+            all: async () => ({ items: [], count: 0 }),
+        },
+    };
+
+    // When sentExternalCall is true and listing is empty, it returns UNKNOWN (eventual consistency)
+    // rather than CONFIRMED_ABSENT, preventing immediate blind duplicate recreation
+    const res = await findExistingGatewayOrder(mockRazorpayEmpty, mockOrder);
+    assert.equal(res.outcome, "unknown");
+    assert.equal(res.reason, "external_call_dispatched_eventual_consistency");
+});
+
+// ===========================================================================
+// 23. TASK 1: IN_PROGRESS & RECONCILIATION DECISION CONSISTENCY
+// ===========================================================================
+
+test("TASK 1: decidePaymentReconciliationOutcome handles IN_PROGRESS before and after expiry without declaring terminal", () => {
+    const baseOrder = {
+        _id: "507f191e810c19729de860ea",
+        orderId: "ORD-IN-PROG-1",
+        payment: { method: "card", status: "pending", razorpayOrderId: "order_rzp_1" },
+        pricing: { total: 1200 },
+        reservation: { state: "held" },
+    };
+
+    // 1. IN_PROGRESS before expiry -> verification_pending (never terminal or payable)
+    const decBefore = decidePaymentReconciliationOutcome({
+        order: baseOrder,
+        rec: { outcome: RZP_OUTCOME.IN_PROGRESS },
+        isExpired: false,
+        payablePaise: 120000,
+        razorpayOrderId: "order_rzp_1",
+    });
+    assert.equal(decBefore.outcome, "verification_pending");
+    assert.equal(decBefore.status, "pending");
+
+    // 2. IN_PROGRESS after expiry -> STILL verification_pending (never terminal!)
+    const decAfter = decidePaymentReconciliationOutcome({
+        order: baseOrder,
+        rec: { outcome: RZP_OUTCOME.IN_PROGRESS },
+        isExpired: true,
+        payablePaise: 120000,
+        razorpayOrderId: "order_rzp_1",
+    });
+    assert.equal(decAfter.outcome, "verification_pending");
+    assert.equal(decAfter.status, "pending");
+    assert.notEqual(decAfter.outcome, "terminal", "Authorized in-progress payment must NEVER be marked terminal");
+
+    // 3. NO_CAPTURED before expiry -> payable
+    const decNoCapUnexpired = decidePaymentReconciliationOutcome({
+        order: baseOrder,
+        rec: { outcome: RZP_OUTCOME.NO_CAPTURED },
+        isExpired: false,
+        payablePaise: 120000,
+        razorpayOrderId: "order_rzp_1",
+    });
+    assert.equal(decNoCapUnexpired.outcome, "payable");
+    assert.equal(decNoCapUnexpired.amount, 120000);
+
+    // 4. NO_CAPTURED after expiry -> terminal
+    const decNoCapExpired = decidePaymentReconciliationOutcome({
+        order: baseOrder,
+        rec: { outcome: RZP_OUTCOME.NO_CAPTURED },
+        isExpired: true,
+        payablePaise: 120000,
+        razorpayOrderId: "order_rzp_1",
+    });
+    assert.equal(decNoCapExpired.outcome, "terminal");
+    assert.equal(decNoCapExpired.status, "failed");
+
+    // 5. UNKNOWN before and after expiry -> verification_pending
+    const decUnknown = decidePaymentReconciliationOutcome({
+        order: baseOrder,
+        rec: { outcome: RZP_OUTCOME.UNKNOWN },
+        isExpired: true,
+        payablePaise: 120000,
+        razorpayOrderId: "order_rzp_1",
+    });
+    assert.equal(decUnknown.outcome, "verification_pending");
+
+    // 6. CAPTURED_VALID -> capture_valid
+    const decCaptured = decidePaymentReconciliationOutcome({
+        order: baseOrder,
+        rec: { outcome: RZP_OUTCOME.CAPTURED_VALID, payment: { id: "pay_captured_1", amount: 120000 } },
+        isExpired: true,
+        payablePaise: 120000,
+        razorpayOrderId: "order_rzp_1",
+    });
+    assert.equal(decCaptured.decision, "capture_valid");
+    assert.equal(decCaptured.paymentId, "pay_captured_1");
+    assert.equal(decCaptured.amountPaise, 120000);
+
+    // 7. MISMATCH -> mismatch_held
+    const decMismatch = decidePaymentReconciliationOutcome({
+        order: baseOrder,
+        rec: { outcome: RZP_OUTCOME.MISMATCH, reason: "currency mismatch" },
+        isExpired: false,
+        payablePaise: 120000,
+        razorpayOrderId: "order_rzp_1",
+    });
+    assert.equal(decMismatch.outcome, "held");
+    assert.equal(decMismatch.status, "pending");
+});
+
 
 

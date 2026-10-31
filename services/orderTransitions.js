@@ -235,10 +235,16 @@ export async function executeOrderTransition(
             }
         }
 
+        const isDispatched = ["shipped", "in_transit", "out_for_delivery", "delivered"].includes(toStatus);
+        const setDoc = { status: toStatus };
+        if (isDispatched && order.reservation?.state === "held") {
+            setDoc["reservation.state"] = "return_pending";
+        }
+
         const updated = await Order.findOneAndUpdate(
             filter,
             {
-                $set: { status: toStatus },
+                $set: setDoc,
                 $push: { timeline: timelineEntry },
             },
             { new: true, session }

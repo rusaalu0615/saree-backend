@@ -351,6 +351,19 @@ export async function ensureGatewayOrder(razorpay, order, { leaseMs = DEFAULT_LE
         };
     }
 
+    // 2b. If reservation is already released or expired, and no external call was ever sent,
+    // order is already terminal and cannot be initialized.
+    const isExpiredPreCheck = order.payment?.expiresAt && new Date(order.payment.expiresAt).getTime() <= Date.now();
+    const isReleasedPreCheck = order.reservation?.state === "released" || order.resourcesReleased;
+    if ((isExpiredPreCheck || isReleasedPreCheck) && !order.gatewayInit?.sentExternalCall) {
+        return {
+            kind: GATEWAY_RESULT_KIND.TERMINAL,
+            success: false,
+            order,
+            message: "Payment window has expired or reservation was released; cannot initialize payment.",
+        };
+    }
+
     if (!razorpay) {
         throw new Error("Razorpay instance not configured");
     }
@@ -463,6 +476,31 @@ export async function ensureGatewayOrder(razorpay, order, { leaseMs = DEFAULT_LE
             };
         }
         // Only if outcome === CONFIRMED_ABSENT can execution proceed to create a new order
+    }
+
+    // 4b. Before proceeding to create a new remote order, verify reservation eligibility!
+    // Never make an expired or released reservation payable by blindly creating a new gateway order.
+    const isExpired = claimedOrder.payment?.expiresAt && new Date(claimedOrder.payment.expiresAt).getTime() <= Date.now();
+    const isReservationReleased = claimedOrder.reservation?.state === "released" || claimedOrder.resourcesReleased;
+    if (isExpired || isReservationReleased) {
+        await Order.updateOne(
+            { _id: order._id, "gatewayInit.claimToken": claimToken },
+            {
+                $set: {
+                    "gatewayInit.status": GATEWAY_INIT_STATUS.FAILED,
+                    "gatewayInit.claimToken": null,
+                    "gatewayInit.claimExpiresAt": null,
+                    "payment.status": "failed",
+                },
+            }
+        );
+        const fresh = await Order.findById(order._id);
+        return {
+            kind: GATEWAY_RESULT_KIND.TERMINAL,
+            success: false,
+            order: fresh || claimedOrder,
+            message: "Payment window has expired or reservation was released; cannot initialize payment.",
+        };
     }
 
     // 5. Persist external call intent with fenced ownership before calling Razorpay

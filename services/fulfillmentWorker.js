@@ -166,17 +166,53 @@ async function stageEnsureShipment(order, claimToken) {
         const lookup = await shiprocket.findShipmentByOurOrderId(order.orderId);
 
         if (lookup.outcome === "FOUND") {
-            await ownedUpdate(order._id, claimToken, {
-                "shiprocket.orderId": lookup.shipment.srOrderId,
-                "shiprocket.shipmentId": lookup.shipment.shipmentId,
-                "shiprocket.status": lookup.shipment.status,
-                "fulfillment.stage": "sr_created",
-                "fulfillment.stageConfirmedAt": new Date(),
-                "fulfillment.uncertainSince": null,
-                "fulfillment.lastError": null,
-                status: order.status === "placed" ? "confirmed" : order.status,
-            });
-            return Order.findById(order._id);
+            const advanceRes = await Order.updateOne(
+                {
+                    _id: order._id,
+                    "fulfillment.lockOwner": claimToken,
+                    ...eligibilityFilter(),
+                },
+                {
+                    $set: {
+                        "shiprocket.orderId": lookup.shipment.srOrderId,
+                        "shiprocket.shipmentId": lookup.shipment.shipmentId,
+                        "shiprocket.status": lookup.shipment.status,
+                        "fulfillment.stage": "sr_created",
+                        "fulfillment.stageConfirmedAt": new Date(),
+                        "fulfillment.uncertainSince": null,
+                        "fulfillment.lastError": null,
+                        "fulfillment.updatedAt": new Date(),
+                        status: "confirmed",
+                    },
+                    $push: {
+                        timeline: {
+                            status: "Order Confirmed",
+                            description: "Order confirmed from shipping partner reconciliation",
+                            date: new Date(),
+                        },
+                    },
+                }
+            );
+
+            if (advanceRes.modifiedCount === 1) {
+                return Order.findById(order._id);
+            }
+
+            // Order cancelled, hold placed, or lease lost: preserve found IDs but do not advance status
+            await Order.updateOne(
+                { _id: order._id },
+                {
+                    $set: {
+                        "shiprocket.orderId": lookup.shipment.srOrderId,
+                        "shiprocket.shipmentId": lookup.shipment.shipmentId,
+                        "shiprocket.status": lookup.shipment.status,
+                        "fulfillment.stage": "needs_reconciliation",
+                        "fulfillment.uncertainSince": null,
+                        "fulfillment.updatedAt": new Date(),
+                    },
+                }
+            ).catch(() => {});
+            throw Object.assign(new Error("order_cancelled_during_reconciliation"), { code: "cancelled_during_create" });
         }
 
         // UNKNOWN or a fresh/empty absence: keep the durable uncertain stage and
@@ -228,30 +264,106 @@ async function stageEnsureShipment(order, claimToken) {
         throw new Error(`Shiprocket create returned identical order/shipment ids: ${JSON.stringify(result).slice(0, 160)}`);
     }
 
-    const res = await ownedUpdate(
-        order._id,
-        claimToken,
+    // Distinguish recording provider result from permission to advance fulfillment.
+    // Atomically advance ONLY if the order is STILL eligible and we STILL own the lease.
+    const advanceRes = await Order.updateOne(
         {
-            "shiprocket.orderId": result.order_id,
-            "shiprocket.shipmentId": result.shipment_id,
-            "shiprocket.status": result.status || null,
-            "fulfillment.stage": "sr_created",
-            "fulfillment.stageConfirmedAt": new Date(),
-            "fulfillment.uncertainSince": null,
-            status: order.status === "placed" ? "confirmed" : order.status,
+            _id: order._id,
+            "fulfillment.lockOwner": claimToken,
+            ...eligibilityFilter(),
         },
-        { timeline: { status: "Order Confirmed", description: "Order confirmed and sent to shipping partner", date: new Date() } }
+        {
+            $set: {
+                "shiprocket.orderId": result.order_id,
+                "shiprocket.shipmentId": result.shipment_id,
+                "shiprocket.status": result.status || null,
+                "fulfillment.stage": "sr_created",
+                "fulfillment.stageConfirmedAt": new Date(),
+                "fulfillment.uncertainSince": null,
+                "fulfillment.lastError": null,
+                "fulfillment.updatedAt": new Date(),
+                status: "confirmed",
+            },
+            $push: {
+                timeline: {
+                    status: "Order Confirmed",
+                    description: "Order confirmed and sent to shipping partner",
+                    date: new Date(),
+                },
+            },
+        }
     );
-    if (res.modifiedCount !== 1) {
-        // We lost the lease but the create SUCCEEDED — adopt the ids by owner-
-        // independent id write so the shipment is never orphaned/recreated.
-        await Order.updateOne(
-            { _id: order._id, "shiprocket.orderId": { $exists: false } },
-            { $set: { "shiprocket.orderId": result.order_id, "shiprocket.shipmentId": result.shipment_id, "fulfillment.uncertainSince": null } }
-        ).catch(() => {});
-        throw Object.assign(new Error("lease_lost_after_create"), { code: "lease" });
+
+    if (advanceRes.modifiedCount === 1) {
+        return Order.findById(order._id);
     }
-    return Order.findById(order._id);
+
+    // Advancement write was rejected: lease was lost OR order was cancelled/held while create was pending.
+    // In ALL cases, NEVER discard returned shipment IDs! Adopt them idempotently.
+    await Order.updateOne(
+        {
+            _id: order._id,
+            $or: [{ "shiprocket.orderId": null }, { "shiprocket.orderId": { $exists: false } }],
+        },
+        {
+            $set: {
+                "shiprocket.orderId": result.order_id,
+                "shiprocket.shipmentId": result.shipment_id,
+                "shiprocket.status": result.status || null,
+                "fulfillment.uncertainSince": null,
+                "fulfillment.updatedAt": new Date(),
+            },
+        }
+    ).catch(() => {});
+
+    // Re-read authoritative doc to classify why advancement failed.
+    const fresh = await Order.findById(order._id);
+    if (!fresh) {
+        throw Object.assign(new Error("order_not_found_after_create"), { code: "order_not_found" });
+    }
+
+    const isCancelledOrHeld =
+        ["cancelled", "returned"].includes(fresh.status) ||
+        ["requested", "completed"].includes(fresh.cancellation?.status) ||
+        fresh.fulfillmentHold?.active ||
+        ["released", "return_pending", "return_restored"].includes(fresh.reservation?.state);
+
+    if (isCancelledOrHeld) {
+        // Order was cancelled/held while create was in flight!
+        // Persist durable cancellation work for the shipment created at Shiprocket.
+        let cancelOutcome = "uncertain";
+        try {
+            const cRes = await shiprocket.cancelShiprocketOrder(result.order_id);
+            cancelOutcome = cRes?.outcome || (cRes?.status_code === 200 || cRes?.status === 200 || cRes?.message === "Order cancelled successfully" ? "confirmed" : "uncertain");
+        } catch (cErr) {
+            cancelOutcome = "uncertain";
+        }
+
+        await Order.updateOne(
+            { _id: order._id },
+            {
+                $set: {
+                    "cancellation.courierOutcome": cancelOutcome,
+                    "fulfillment.stage": cancelOutcome === "confirmed" ? "cancelled" : "needs_reconciliation",
+                    "fulfillment.lastError": `Shipment ${result.shipment_id} created during cancellation — courier cancel ${cancelOutcome}`,
+                    "fulfillment.lockUntil": null,
+                    "fulfillment.updatedAt": new Date(),
+                },
+                $push: {
+                    timeline: {
+                        status: cancelOutcome === "confirmed" ? "Courier Cancel Confirmed" : "Courier Cancel Uncertain",
+                        description: `Shipment created during cancellation — courier cancel ${cancelOutcome}`,
+                        date: new Date(),
+                    },
+                },
+            }
+        ).catch(() => {});
+
+        throw Object.assign(new Error("order_cancelled_during_create"), { code: "cancelled_during_create" });
+    }
+
+    // Not cancelled: ownership was lost to another worker.
+    throw Object.assign(new Error("lease_lost_after_create"), { code: "lease" });
 }
 
 async function stageAssignCourier(order, claimToken) {
@@ -421,6 +533,10 @@ export async function runFulfillmentForOrder(orderId, workerId = WORKER_ID) {
         return { claimed: true, completed, orderId: order.orderId };
     } catch (err) {
         if (err?.code === "lease") return { claimed: true, stopped: true, orderId: order.orderId };
+        if (err?.code === "cancelled_during_create") {
+            await releaseLease(order._id, claimToken).catch(() => {});
+            return { claimed: true, stopped: true, cancelled: true, orderId: order.orderId };
+        }
         // A controlled reconcile hold: we already scheduled the next attempt under
         // our claim token; free the lease and leave the uncertain stage untouched.
         if (err?.code === "reconcile_pending") {

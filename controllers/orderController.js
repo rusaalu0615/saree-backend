@@ -518,15 +518,16 @@ const createOrder = asyncHandler(async (req, res) => {
 // frontend branches on the EXPLICIT contract fields below rather than inferring
 // state from the mere presence of razorpayOrderId (fixes the zero-payable bug
 // where a settled paid order had no gateway id and looked like a failure).
-function buildCheckoutOrderResponse(order, checkoutToken) {
-    const payablePaise = toPaise(order.pricing.total);
+export function buildCheckoutOrderResponse(order, checkoutToken) {
+    const rawTotal = order.pricing?.total;
+    const payablePaise = toPaise(rawTotal !== undefined && rawTotal !== null ? rawTotal : 0);
     const resp = {
         orderId: order.orderId,
         _id: order._id,
         status: order.status,
-        paymentStatus: order.payment.status,
-        paymentMethod: order.payment.method,
-        total: order.pricing.total,
+        paymentStatus: order.payment?.status,
+        paymentMethod: order.payment?.method,
+        total: order.pricing?.total ?? 0,
         payablePaise,
         key: process.env.RAZORPAY_KEY_ID, // server is the single source of the publishable key
         checkoutToken: checkoutToken || undefined,
@@ -537,16 +538,17 @@ function buildCheckoutOrderResponse(order, checkoutToken) {
     // (fixes the zero-payable bug and stops "success just because COD").
     const held = order.fulfillmentHold?.active === true;
     const cancelled = order.cancellation?.status === "completed" || order.status === "cancelled";
-    const refunded = order.payment.status === "refunded";
-    const paid = order.payment.status === "paid";
-    const cod = order.payment.method === "cod";
+    const refunded = order.payment?.status === "refunded";
+    const paid = order.payment?.status === "paid";
+    const cod = order.payment?.method === "cod";
+    const zeroPayable = !cod && payablePaise <= 0;
     const needsGateway =
-        !cod && order.payment.status === "pending" && payablePaise > 0 && !!order.payment.razorpayOrderId;
+        !cod && order.payment?.status === "pending" && payablePaise > 0 && !!order.payment?.razorpayOrderId;
 
     let outcome;
     if (held) outcome = "held_for_review";
     else if (refunded || cancelled) outcome = "rejected_terminal";
-    else if (paid) outcome = "paid_settled";
+    else if (paid || zeroPayable) outcome = "paid_settled";
     else if (cod) outcome = "order_placed_cod";
     else if (needsGateway) outcome = "awaiting_payment";
     else outcome = "pending_recovery"; // prepaid, pending, gateway id not yet linked
@@ -741,7 +743,135 @@ async function fulfillPaidOrder(order) {
 // gateway. Every mutation here requires ownership proof (auth or capability
 // token) and captured-payment is confirmed AUTHORITATIVELY against Razorpay —
 // a valid checkout signature alone is not treated as proof money was captured.
-// ---------------------------------------------------------------------------
+/**
+ * Shared reconciliation decision helper for both existing-gateway-ID (step 3)
+ * and newly-recovered-gateway (step 4) verification branches.
+ *
+ * Guarantees:
+ * - IN_PROGRESS always returns verification_pending, preserving recovery,
+ *   even if local payment window has passed.
+ * - UNKNOWN and unexpected outcomes remain unresolved verification_pending.
+ * - Only NO_CAPTURED evaluates unpaid eligibility / expiry.
+ */
+function decidePaymentReconciliationOutcome({
+    order,
+    rec,
+    isExpired,
+    payablePaise,
+    razorpayOrderId,
+}) {
+    if (rec.outcome === RZP_OUTCOME.CAPTURED_VALID) {
+        return {
+            decision: "capture_valid",
+            paymentId: rec.payment.id,
+            amountPaise: rec.payment.amount,
+        };
+    }
+
+    if (rec.outcome === RZP_OUTCOME.IN_PROGRESS) {
+        return {
+            decision: "respond",
+            status: "pending",
+            outcome: "verification_pending",
+            message: "Payment authorized at gateway; capture confirmation pending.",
+            orderId: order.orderId,
+        };
+    }
+
+    if (rec.outcome === RZP_OUTCOME.MISMATCH) {
+        return {
+            decision: "mismatch_held",
+            status: "pending",
+            outcome: "held",
+            message: "Payment needs manual confirmation — the store has been alerted.",
+            reason: `Payment reconciliation mismatch: ${rec.reason}`,
+            orderId: order.orderId,
+        };
+    }
+
+    if (rec.outcome === RZP_OUTCOME.UNKNOWN) {
+        return {
+            decision: "respond",
+            status: "pending",
+            outcome: "verification_pending",
+            message: "Payment status is being reconciled with the gateway. Please retry in a moment.",
+            orderId: order.orderId,
+        };
+    }
+
+    if (rec.outcome === RZP_OUTCOME.NO_CAPTURED) {
+        if (order.status === "cancelled" || order.payment?.status === "failed") {
+            return {
+                decision: "respond",
+                status: order.payment?.status || "failed",
+                outcome: "terminal",
+                message: "This order has been cancelled or has expired.",
+                orderId: order.orderId,
+            };
+        }
+        if (order.fulfillmentHold?.active) {
+            return {
+                decision: "respond",
+                status: order.payment?.status,
+                outcome: "held",
+                message: `Order is on hold for review: ${order.fulfillmentHold.reason || "Review required"}`,
+                orderId: order.orderId,
+            };
+        }
+        if (order.reservation?.state === "released" || order.resourcesReleased) {
+            return {
+                decision: "respond",
+                status: "failed",
+                outcome: "terminal",
+                message: "Inventory reservation for this order has expired.",
+                orderId: order.orderId,
+            };
+        }
+        if (isExpired) {
+            return {
+                decision: "respond",
+                status: "failed",
+                outcome: "terminal",
+                message: "Payment window for this order has expired.",
+                orderId: order.orderId,
+            };
+        }
+
+        if (payablePaise <= 0) {
+            return {
+                decision: "respond",
+                status: "paid",
+                outcome: "paid",
+                orderId: order.orderId,
+                amount: 0,
+                message: "Order is zero-payable and already settled.",
+            };
+        }
+
+        return {
+            decision: "respond",
+            status: "pending",
+            outcome: "payable",
+            razorpayOrderId,
+            amount: payablePaise,
+            currency: "INR",
+            key: process.env.RAZORPAY_KEY_ID,
+            orderId: order.orderId,
+            message: "Order is eligible for payment.",
+        };
+    }
+
+    // Default conservative fallback: any unhandled or unrecognized outcome
+    // must remain unresolved verification_pending, never terminal or payable!
+    return {
+        decision: "respond",
+        status: "pending",
+        outcome: "verification_pending",
+        message: "Payment status is pending reconciliation. Please retry in a moment.",
+        orderId: order.orderId,
+    };
+}
+
 const verifyPayment = asyncHandler(async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
@@ -819,10 +949,20 @@ const verifyPayment = asyncHandler(async (req, res) => {
             expectedPaymentId: hasTriple ? razorpay_payment_id : undefined,
         });
 
-        if (rec.outcome === RZP_OUTCOME.CAPTURED_VALID) {
+        const isExpired = order.payment?.expiresAt && new Date(order.payment.expiresAt).getTime() <= Date.now();
+        const payablePaise = toPaise(order.pricing?.total ?? 0);
+        const dec = decidePaymentReconciliationOutcome({
+            order,
+            rec,
+            isExpired,
+            payablePaise,
+            razorpayOrderId: order.payment.razorpayOrderId,
+        });
+
+        if (dec.decision === "capture_valid") {
             const claimed = await confirmPaymentCaptured(order._id, {
-                paymentId: rec.payment.id,
-                amountPaise: rec.payment.amount,
+                paymentId: dec.paymentId,
+                amountPaise: dec.amountPaise,
                 source: hasTriple ? "browser-verify" : "gateway-recovery",
             });
             if (claimed) {
@@ -860,95 +1000,34 @@ const verifyPayment = asyncHandler(async (req, res) => {
             });
         }
 
-        if (rec.outcome === RZP_OUTCOME.IN_PROGRESS) {
-            return res.status(200).json({
-                success: true,
-                status: "pending",
-                outcome: "verification_pending",
-                message: "Payment authorized at gateway; capture confirmation pending.",
-                orderId: order.orderId,
-            });
-        }
-
-        if (rec.outcome === RZP_OUTCOME.MISMATCH) {
+        if (dec.decision === "mismatch_held") {
             await Order.updateOne(
                 { _id: order._id },
-                { $set: { "fulfillmentHold.active": true, "fulfillmentHold.reason": `Payment reconciliation mismatch: ${rec.reason}` } }
+                { $set: { "fulfillmentHold.active": true, "fulfillmentHold.reason": dec.reason } }
             ).catch(() => {});
             return res.status(200).json({
                 success: true,
-                status: "pending",
-                outcome: "held",
-                message: "Payment needs manual confirmation — the store has been alerted.",
-                orderId: order.orderId,
+                status: dec.status,
+                outcome: dec.outcome,
+                message: dec.message,
+                orderId: dec.orderId,
             });
         }
 
-        if (rec.outcome === RZP_OUTCOME.UNKNOWN) {
-            return res.status(200).json({
-                success: true,
-                status: "pending",
-                outcome: "verification_pending",
-                message: "Payment status is being reconciled with the gateway. Please retry in a moment.",
-                orderId: order.orderId,
-            });
-        }
-
-        // rec.outcome === RZP_OUTCOME.NO_CAPTURED:
-        // Razorpay confirms no payment was captured. NOW evaluate local terminal/expiry conditions:
-        if (order.status === "cancelled" || order.payment.status === "failed") {
-            return res.status(200).json({
-                success: true,
-                status: order.payment.status || "failed",
-                outcome: "terminal",
-                message: "This order has been cancelled or has expired.",
-                orderId: order.orderId,
-            });
-        }
-        if (order.fulfillmentHold?.active) {
-            return res.status(200).json({
-                success: true,
-                status: order.payment.status,
-                outcome: "held",
-                message: `Order is on hold for review: ${order.fulfillmentHold.reason || "Review required"}`,
-                orderId: order.orderId,
-            });
-        }
-        if (order.reservation?.state === "released" || order.resourcesReleased) {
-            return res.status(200).json({
-                success: true,
-                status: "failed",
-                outcome: "terminal",
-                message: "Inventory reservation for this order has expired.",
-                orderId: order.orderId,
-            });
-        }
-        const isExpired = order.payment?.expiresAt && new Date(order.payment.expiresAt).getTime() <= Date.now();
-        if (isExpired) {
-            return res.status(200).json({
-                success: true,
-                status: "failed",
-                outcome: "terminal",
-                message: "Payment window for this order has expired.",
-                orderId: order.orderId,
-            });
-        }
-
-        // Within window and genuinely unpaid: payable
         return res.status(200).json({
             success: true,
-            status: "pending",
-            outcome: "payable",
-            razorpayOrderId: order.payment.razorpayOrderId,
-            amount: toPaise(order.pricing.total),
-            currency: "INR",
-            key: process.env.RAZORPAY_KEY_ID,
-            orderId: order.orderId,
-            message: "Order is eligible for payment.",
+            status: dec.status,
+            outcome: dec.outcome,
+            message: dec.message,
+            orderId: dec.orderId,
+            razorpayOrderId: dec.razorpayOrderId,
+            amount: dec.amount,
+            currency: dec.currency,
+            key: dec.key,
         });
     }
 
-    // 4. ORDER HAS NO GATEWAY ORDER ID (TASK 2):
+    // 4. ORDER HAS NO GATEWAY ORDER ID (TASK 2 & TASK 4):
     // Check terminal/held conditions first:
     if (order.status === "cancelled" || order.payment.status === "failed") {
         return res.status(200).json({
@@ -968,7 +1047,8 @@ const verifyPayment = asyncHandler(async (req, res) => {
             orderId: order.orderId,
         });
     }
-    if (order.reservation?.state === "released" || order.resourcesReleased) {
+    // Only declare terminal due to released reservation if no external call was ever dispatched
+    if ((order.reservation?.state === "released" || order.resourcesReleased) && !order.gatewayInit?.sentExternalCall) {
         return res.status(200).json({
             success: true,
             status: "failed",
@@ -978,7 +1058,8 @@ const verifyPayment = asyncHandler(async (req, res) => {
         });
     }
     const isExpiredNoGw = order.payment?.expiresAt && new Date(order.payment.expiresAt).getTime() <= Date.now();
-    if (isExpiredNoGw) {
+    // Only declare terminal due to expiry if no external call was ever dispatched
+    if (isExpiredNoGw && !order.gatewayInit?.sentExternalCall) {
         return res.status(200).json({
             success: true,
             status: "failed",
@@ -996,7 +1077,7 @@ const verifyPayment = asyncHandler(async (req, res) => {
             orderId: order.orderId,
         });
     }
-    if (order.gatewayInit?.status === "failed") {
+    if (order.gatewayInit?.status === "failed" && !order.gatewayInit?.sentExternalCall) {
         return res.status(200).json({
             success: true,
             status: "failed",
@@ -1006,20 +1087,88 @@ const verifyPayment = asyncHandler(async (req, res) => {
         });
     }
 
-    // ELIGIBLE: Reconnect "preparing" to real gateway recovery using shared ensureGatewayOrder!
+    // ELIGIBLE or NEEDS RECONCILIATION: Reconnect "preparing" to real gateway recovery using shared ensureGatewayOrder!
     const gw = await ensureGatewayOrder(razorpayInstance, order);
 
     if (gw.kind === "ready" && gw.razorpayOrderId) {
+        const orderTotal = gw.order?.pricing?.total ?? order.pricing?.total ?? 0;
+        const payablePaise = toPaise(orderTotal);
+        if (payablePaise <= 0) {
+            return res.status(200).json({
+                success: true,
+                status: "paid",
+                outcome: "paid",
+                orderId: order.orderId,
+                amount: 0,
+                message: "Order is zero-payable.",
+            });
+        }
+
+        // Reconcile payment status against Razorpay to ensure captured payments are honored
+        const rec = await reconcileOrderPayments(razorpayInstance, gw.razorpayOrderId, {
+            expectedAmountPaise: payablePaise,
+            expectedCurrency: "INR",
+        });
+
+        const isNowExpired = isExpiredNoGw || (order.payment?.expiresAt && new Date(order.payment.expiresAt).getTime() <= Date.now());
+        const dec = decidePaymentReconciliationOutcome({
+            order,
+            rec,
+            isExpired: isNowExpired,
+            payablePaise,
+            razorpayOrderId: gw.razorpayOrderId,
+        });
+
+        if (dec.decision === "capture_valid") {
+            await confirmPaymentCaptured(order._id, {
+                paymentId: dec.paymentId,
+                amountPaise: dec.amountPaise,
+                source: "verify-payment-gateway-recovery",
+            });
+            await settleCartAfterPayment(order).catch(() => {});
+            const fresh = await Order.findById(order._id);
+            if (fresh?.fulfillmentHold?.active) {
+                return res.status(200).json({
+                    success: true,
+                    status: "paid",
+                    outcome: "held",
+                    message: `Payment received, but order is held for review: ${fresh.fulfillmentHold.reason || "Fulfillment hold active"}`,
+                    orderId: order.orderId,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                status: "paid",
+                outcome: "paid",
+                orderId: order.orderId,
+                message: "Payment successfully verified.",
+            });
+        }
+
+        if (dec.decision === "mismatch_held") {
+            await Order.updateOne(
+                { _id: order._id },
+                { $set: { "fulfillmentHold.active": true, "fulfillmentHold.reason": dec.reason } }
+            );
+            return res.status(200).json({
+                success: true,
+                status: dec.status,
+                outcome: dec.outcome,
+                message: dec.message,
+                orderId: dec.orderId,
+            });
+        }
+
         return res.status(200).json({
             success: true,
-            status: "pending",
-            outcome: "payable",
-            razorpayOrderId: gw.razorpayOrderId,
-            amount: toPaise(gw.order?.pricing?.total || order.pricing.total),
-            currency: "INR",
-            key: process.env.RAZORPAY_KEY_ID,
-            orderId: order.orderId,
-            message: "Order is eligible for payment.",
+            status: dec.status,
+            outcome: dec.outcome,
+            message: dec.message,
+            orderId: dec.orderId,
+            razorpayOrderId: dec.razorpayOrderId,
+            amount: dec.amount,
+            currency: dec.currency,
+            key: dec.key,
         });
     }
 
@@ -1269,25 +1418,53 @@ export { normalizeTrackingResult, sanitizeTrackingForPublic, mapShipmentStatus, 
  */
 async function syncOrderFromShipment(orderDoc, trackingPayload) {
     try {
-        if (!trackingPayload || ["cancelled", "returned"].includes(orderDoc.status)) return;
+        if (!trackingPayload || ["cancelled", "returned"].includes(orderDoc.status) || ["requested", "completed"].includes(orderDoc.cancellation?.status)) return;
         const n = normalizeTrackingResult(trackingPayload);
         const srStatus = n?.currentStatus || n?.shipmentStatus;
-        if (!srStatus || orderDoc.shiprocket.status === srStatus) return;
-
-        orderDoc.shiprocket.status = srStatus;
+        if (!srStatus) return;
 
         const mapped = mapShipmentStatus(srStatus);
         const curRank = STATUS_RANK[orderDoc.status] ?? -1;
         const newRank = mapped ? (STATUS_RANK[mapped] ?? -1) : -1;
+        const effectiveRank = Math.max(curRank, newRank);
+
+        // Gap Fix: Even if tracking status is unchanged, check if a missing dispatch marker needs repair!
+        // Authoritative tracking evidence (or current order status) indicates dispatch:
+        if (effectiveRank >= STATUS_RANK.shipped && orderDoc.reservation?.state === "held") {
+            await markDispatched(orderDoc._id).catch((err) =>
+                console.error(`[Sync] markDispatched repair failed for ${orderDoc.orderId}:`, err.message)
+            );
+            orderDoc.reservation.state = "return_pending";
+        }
+
+        // If tracking status has not changed, nothing more to do (dispatch repair already handled above).
+        if (orderDoc.shiprocket.status === srStatus) return;
+
+        orderDoc.shiprocket.status = srStatus;
 
         if (mapped && newRank > curRank) {
+            // Check fresh database state conditionally so out-of-order responses never regress newer state or overwrite cancellation
+            const fresh = await Order.findById(orderDoc._id).select("status cancellation reservation").lean();
+            if (!fresh || ["cancelled", "returned"].includes(fresh.status) || ["requested", "completed"].includes(fresh.cancellation?.status)) {
+                return;
+            }
+            const freshRank = STATUS_RANK[fresh.status] ?? -1;
+            if (newRank <= freshRank) {
+                // Out-of-order or older tracking update — do not regress
+                return;
+            }
+
             orderDoc.status = mapped;
+            if (newRank >= STATUS_RANK.shipped && orderDoc.reservation?.state === "held") {
+                orderDoc.reservation.state = "return_pending";
+            }
             orderDoc.timeline.push({
                 status: mapped.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase()),
                 description: `Courier update from ${orderDoc.shiprocket.courierName || "Shiprocket"}: ${srStatus}`,
                 date: new Date(),
             });
             await orderDoc.save();
+
             // Durably enqueue the status email via the outbox — fire-and-forget
             // SMTP here used to silently drop customer notifications on failure.
             await enqueueShippingEmail(orderDoc._id, mapped).catch((err) =>
@@ -1296,19 +1473,6 @@ async function syncOrderFromShipment(orderDoc, trackingPayload) {
             console.log(`[Sync] Order ${orderDoc.orderId} advanced to '${mapped}' (courier: ${srStatus})`);
         } else {
             await orderDoc.save();
-        }
-
-        // DISPATCH = a REAL courier handover, not merely a scheduled pickup. Only
-        // once authoritative tracking reaches shipped/in-transit/OFD/delivered do
-        // we freeze the reservation (held → return_pending) so a later cancel waits
-        // for a verified physical return instead of wrongly restoring lost stock.
-        // markDispatched is a conditional held→return_pending write, so it is
-        // idempotent and never downgrades an already-released/returned order.
-        const effectiveRank = STATUS_RANK[orderDoc.status] ?? -1;
-        if (effectiveRank >= STATUS_RANK.shipped) {
-            await markDispatched(orderDoc._id).catch((err) =>
-                console.error(`[Sync] markDispatched failed for ${orderDoc.orderId}:`, err.message)
-            );
         }
     } catch (err) {
         // Sync is best-effort — never break the tracking response over it
@@ -1566,29 +1730,92 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 const cancelOrder = asyncHandler(async (req, res) => {
     const order = await Order.findById(req.params.id);
     if (!order) throw new AppError("Order not found", 404);
+
+    if (order.status === "returned") {
+        throw new AppError("Returned orders cannot be cancelled.", 400);
+    }
+    if (order.status === "delivered") {
+        throw new AppError("Delivered orders cannot be cancelled.", 400);
+    }
     if (order.status === "cancelled" || order.cancellation?.status === "completed") {
-        throw new AppError("Order is already cancelled.", 400);
+        return res.status(200).json({
+            success: true,
+            order,
+            message: "Order is already cancelled.",
+        });
     }
 
     // 1. Record cancellation INTENT (idempotent atomic claim).
     await requestCancellation(order._id, { reason: req.body.reason || "Order cancelled by admin" });
 
-    // 2. Ask the courier — persist the OUTCOME separately; an error is UNCERTAIN,
-    //    never proof the parcel stopped.
+    // 2. Ask the courier — persist the OUTCOME separately;
+    // Only use "not_needed" when there is reliable evidence no shipment exists and none is in flight.
     let courierOutcome = "not_needed";
-    if (order.shiprocket?.orderId) {
-        try {
-            await shiprocket.cancelShiprocketOrder(order.shiprocket.orderId);
-            courierOutcome = "confirmed";
-        } catch (err) {
-            courierOutcome = "uncertain";
-            await Order.updateOne({ _id: order._id }, { $push: { timeline: { status: "Courier Cancel Uncertain", description: `Shiprocket cancel returned (${String(err.message).slice(0, 120)}) — verify on the courier portal before assuming the parcel stopped.`, date: new Date() } } });
+    const hasShipment = !!order.shiprocket?.orderId;
+    const isFulfillmentActive =
+        ["create_uncertain", "needs_reconciliation"].includes(order.fulfillment?.stage) ||
+        (order.fulfillment?.lockUntil && new Date(order.fulfillment.lockUntil) > new Date());
+
+    if (hasShipment) {
+        const cancelResult = await shiprocket.cancelShiprocketOrder(order.shiprocket.orderId);
+        courierOutcome = cancelResult.outcome; // "confirmed" | "failed" | "uncertain"
+        if (courierOutcome === "uncertain") {
+            await Order.updateOne(
+                { _id: order._id },
+                {
+                    $push: {
+                        timeline: {
+                            status: "Courier Cancel Uncertain",
+                            description: `Shiprocket cancel returned uncertain (${cancelResult.error || cancelResult.message || "Timeout/Network"}) — verify on courier portal before assuming parcel stopped.`,
+                            date: new Date(),
+                        },
+                    },
+                }
+            );
+        } else if (courierOutcome === "failed") {
+            await Order.updateOne(
+                { _id: order._id },
+                {
+                    $push: {
+                        timeline: {
+                            status: "Courier Cancel Failed",
+                            description: `Shiprocket refused cancellation (${cancelResult.message || cancelResult.error || "Parcel already dispatched"}).`,
+                            date: new Date(),
+                        },
+                    },
+                }
+            );
         }
+    } else if (isFulfillmentActive) {
+        courierOutcome = "uncertain";
+        await Order.updateOne(
+            { _id: order._id },
+            {
+                $set: { "fulfillment.stage": "needs_reconciliation" },
+                $push: {
+                    timeline: {
+                        status: "Cancellation Pending Reconciliation",
+                        description: "Fulfillment creation in progress; courier status uncertain pending reconciliation.",
+                        date: new Date(),
+                    },
+                },
+            }
+        );
+    } else {
+        courierOutcome = "not_needed";
     }
+
     await recordCourierOutcome(order._id, courierOutcome);
 
-    // 3. Auto-refund a real capture ONLY when the courier state is clear. A
-    //    failed/uncertain courier cancel is NOT enough to issue money back.
+    // 3. Inventory: release held reservation ONLY on verified provider stop or not_needed.
+    // Uncertain or failed courier outcomes MUST retain the inventory hold!
+    let releasedReservation = false;
+    if (courierOutcome === "confirmed" || courierOutcome === "not_needed") {
+        const relRes = await releaseReservation(order._id, { reason: "cancelled" });
+        releasedReservation = relRes.released;
+    }
+
+    // 4. Auto-refund real capture ONLY on clear outcomes.
     let refund = null;
     if (order.payment.status === "paid") {
         if (courierOutcome === "not_needed" || courierOutcome === "confirmed") {
@@ -1602,14 +1829,25 @@ const cancelOrder = asyncHandler(async (req, res) => {
         }
     }
 
-    // 4. Inventory: release a HELD (pre-dispatch) reservation exactly once. A
-    //    dispatched parcel stays return_pending until a verified return — the
-    //    transition enforces this by reservation.state, NOT order.status.
-    await releaseReservation(order._id, { reason: "cancelled" });
-
-    // 5. Finalize (display status → cancelled) + durable cancellation email.
-    await completeCancellation(order._id);
-    await enqueueShippingEmail(order._id, "cancelled");
+    // 5. Finalize cancellation ONLY when confirmed or not_needed.
+    // For uncertain or failed outcomes, retain hold and leave cancellation in "requested".
+    let finalized = false;
+    if (courierOutcome === "confirmed" || courierOutcome === "not_needed") {
+        await completeCancellation(order._id);
+        await enqueueShippingEmail(order._id, "cancelled");
+        finalized = true;
+    } else {
+        await Order.updateOne(
+            { _id: order._id },
+            {
+                $set: {
+                    "fulfillmentHold.active": true,
+                    "fulfillmentHold.reason": `Cancellation unconfirmed (${courierOutcome})`,
+                    "fulfillmentHold.placedAt": new Date(),
+                },
+            }
+        );
+    }
 
     const fresh = await Order.findById(order._id);
     res.status(200).json({
@@ -1617,11 +1855,10 @@ const cancelOrder = asyncHandler(async (req, res) => {
         order: fresh,
         refund,
         courierCancel: courierOutcome,
-        message: refund
-            ? `Order cancelled — refund ${refund.status}`
-            : courierOutcome === "confirmed" || courierOutcome === "not_needed"
-                ? "Order cancelled"
-                : "Order cancelled — courier/refund needs confirmation",
+        finalized,
+        message: finalized
+            ? (refund ? `Order cancelled — refund ${refund.status}` : "Order cancelled")
+            : (courierOutcome === "failed" ? "Order cannot be cancelled: parcel is already with courier or dispatched." : "Order cancellation requested — courier verification required."),
     });
 });
 
@@ -1720,4 +1957,6 @@ export const __test = {
     // is not. Asserted in tests/core-logic.test.js with fake models (no DB).
     prepareCollection,
     CHECKOUT_COLLECTION_MODELS,
+    buildCheckoutOrderResponse,
+    decidePaymentReconciliationOutcome,
 };
