@@ -141,6 +141,30 @@ const orderSchema = new mongoose.Schema({
         reason: String,
         courierOutcome: { type: String, enum: [null, "not_needed", "confirmed", "uncertain", "failed"], default: null },
         resolvedAt: Date,
+        requestedBy: { type: String, enum: [null, "customer", "admin", "system"], default: null },
+        attempts: { type: Number, default: 0 },
+        nextAttemptAt: Date,
+        lastError: String,
+        claimToken: String,
+        claimExpiresAt: Date,
+    },
+    // Cash on Delivery (COD) Accounting & Courier Remittance
+    codAccounting: {
+        amountDuePaise: { type: Number, default: 0 },
+        collectedAtDelivery: { type: Boolean, default: false },
+        collectedAmountPaise: { type: Number, default: 0 },
+        collectedAt: Date,
+        remittanceStatus: {
+            type: String,
+            enum: ["none", "pending", "remitted", "discrepancy"],
+            default: "none",
+        },
+        remittedAmountPaise: { type: Number, default: 0 },
+        remittedAt: Date,
+        utr: String,
+        reconciledBy: String,
+        discrepancyReason: String,
+        notes: String,
     },
     // Physical-return progression. A previously cancelled shipment can have its
     // parcel come back and restore stock WITHOUT re-opening the order status.
@@ -253,5 +277,6 @@ orderSchema.index({ "fulfillment.stage": 1, "fulfillment.nextAttemptAt": 1 });
 orderSchema.index({ "gatewayInit.status": 1, "gatewayInit.claimExpiresAt": 1 });
 orderSchema.index({ "payment.status": 1, "gatewayInit.nextAttemptAt": 1, createdAt: 1 });
 orderSchema.index({ "cancellation.status": 1 });
+orderSchema.index({ "cancellation.status": 1, "cancellation.nextAttemptAt": 1 });
 
 export default mongoose.model("Order", orderSchema);

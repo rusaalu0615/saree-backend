@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import User from "../models/userModal.js";
+import Product from "../models/productModal.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 
@@ -22,9 +23,19 @@ function cartProjectionQuery(userId) {
 
 // GET /api/cart — Get user's cart with populated product data
 const getCart = asyncHandler(async (req, res) => {
-    const user = await cartProjectionQuery(req.user._id);
+    let user = await cartProjectionQuery(req.user._id);
 
     if (!user) throw new AppError("User not found", 404);
+
+    // Identify and clean orphaned lines where the product was deleted from DB
+    const deadLineIds = user.cart.filter((item) => !item.productId).map((item) => item._id);
+    if (deadLineIds.length > 0) {
+        await User.updateOne(
+            { _id: req.user._id },
+            { $pull: { cart: { _id: { $in: deadLineIds } } } }
+        );
+        user = await cartProjectionQuery(req.user._id);
+    }
 
     res.status(200).json({
         success: true,
@@ -38,41 +49,100 @@ const addToCart = asyncHandler(async (req, res) => {
 
     if (!productId) throw new AppError("Product ID is required", 400);
     validProductId(productId);
-    const qty = Number.isInteger(quantity) && quantity >= 1 && quantity <= MAX_QTY_PER_LINE
-        ? quantity
-        : 1;
 
-    // 1) Atomic $inc on the existing line — concurrent adds can't clobber
-    //    each other the way read-modify-save did.
+    // Strict integer quantity validation (reject null, undefined, strings, fractions, out-of-range)
+    if (
+        quantity === null ||
+        quantity === undefined ||
+        !Number.isInteger(quantity) ||
+        quantity < 1 ||
+        quantity > MAX_QTY_PER_LINE
+    ) {
+        throw new AppError(`Quantity must be a whole number between 1 and ${MAX_QTY_PER_LINE}`, 400);
+    }
+    const qty = quantity;
+
+    // Validate product existence
+    const product = await Product.findById(productId).select("_id stock price");
+    if (!product) {
+        throw new AppError("Product not found or is no longer available", 404);
+    }
+
+    const pObjectId = new mongoose.Types.ObjectId(productId);
+
+    // 1) Line exists and has room for full increment without exceeding max:
+    // Uses $elemMatch on array elements (never positional placeholder in filter)
     let updated = await User.updateOne(
-        { _id: req.user._id, "cart.productId": productId },
-        { $inc: { "cart.$[line].quantity": qty }, $set: { "cart.$[line].updatedAt": new Date() } },
-        { arrayFilters: [{ "line.productId": new mongoose.Types.ObjectId(productId) }] }
+        {
+            _id: req.user._id,
+            cart: {
+                $elemMatch: {
+                    productId: pObjectId,
+                    quantity: { $lte: MAX_QTY_PER_LINE - qty },
+                },
+            },
+        },
+        {
+            $inc: { "cart.$[line].quantity": qty },
+            $set: { "cart.$[line].updatedAt": new Date() },
+        },
+        { arrayFilters: [{ "line.productId": pObjectId }] }
     );
 
-    // 2) Line absent → push it. Filtered updateOne with a size guard keeps a
-    //    concurrent push from creating a duplicate line for the same product.
+    // 2) Line exists but adding qty would exceed max:
+    // Cap directly at MAX_QTY_PER_LINE in a single atomic update (prevents temporary overshoot)
     if (updated.matchedCount === 0) {
         updated = await User.updateOne(
-            { _id: req.user._id, $or: [{ cart: { $size: 0 } }, { "cart.productId": { $ne: productId } }] },
-            { $push: { cart: { productId, quantity: qty } } }
+            {
+                _id: req.user._id,
+                cart: {
+                    $elemMatch: {
+                        productId: pObjectId,
+                        quantity: { $gt: MAX_QTY_PER_LINE - qty },
+                    },
+                },
+            },
+            {
+                $set: {
+                    "cart.$[line].quantity": MAX_QTY_PER_LINE,
+                    "cart.$[line].updatedAt": new Date(),
+                },
+            },
+            { arrayFilters: [{ "line.productId": pObjectId }] }
+        );
+    }
+
+    // 3) Line absent → push it atomically with duplicate prevention
+    if (updated.matchedCount === 0) {
+        updated = await User.updateOne(
+            { _id: req.user._id, "cart.productId": { $ne: pObjectId } },
+            {
+                $push: {
+                    cart: {
+                        productId: pObjectId,
+                        quantity: Math.min(qty, MAX_QTY_PER_LINE),
+                        updatedAt: new Date(),
+                    },
+                },
+            }
         );
         if (updated.matchedCount === 0) {
-            // Raced with another push — fall back to the atomic increment.
+            // Raced with another push — update existing line capped
             await User.updateOne(
-                { _id: req.user._id, "cart.productId": productId },
+                {
+                    _id: req.user._id,
+                    cart: {
+                        $elemMatch: {
+                            productId: pObjectId,
+                            quantity: { $lte: MAX_QTY_PER_LINE - qty },
+                        },
+                    },
+                },
                 { $inc: { "cart.$[line].quantity": qty } },
-                { arrayFilters: [{ "line.productId": new mongoose.Types.ObjectId(productId) }] }
+                { arrayFilters: [{ "line.productId": pObjectId }] }
             );
         }
     }
-
-    // Cap the line atomically at the allowed maximum.
-    await User.updateOne(
-        { _id: req.user._id, "cart.productId": productId, "cart.$[line].quantity": { $gt: MAX_QTY_PER_LINE } },
-        { $set: { "cart.$[line].quantity": MAX_QTY_PER_LINE } },
-        { arrayFilters: [{ "line.productId": new mongoose.Types.ObjectId(productId) }] }
-    );
 
     const user = await cartProjectionQuery(req.user._id);
     if (!user) throw new AppError("User not found", 404);
@@ -89,21 +159,32 @@ const updateCartItem = asyncHandler(async (req, res) => {
 
     if (!productId) throw new AppError("Product ID is required", 400);
     validProductId(productId);
-    if (quantity === undefined) throw new AppError("Quantity is required", 400);
+
+    // Strict integer validation (reject null, NaN, strings, fractions)
+    if (quantity === undefined || quantity === null || !Number.isInteger(quantity)) {
+        throw new AppError("Quantity must be a valid whole number", 400);
+    }
+
+    const pObjectId = new mongoose.Types.ObjectId(productId);
 
     if (quantity <= 0) {
-        // Remove item if quantity is 0 or less — single atomic pull.
+        // Remove item if quantity is 0 or less (preserve zero-means-remove contract)
         await User.updateOne(
             { _id: req.user._id },
-            { $pull: { cart: { productId: new mongoose.Types.ObjectId(productId) } } }
+            { $pull: { cart: { productId: pObjectId } } }
         );
     } else {
-        const qty = Math.min(Number.isInteger(quantity) ? quantity : 1, MAX_QTY_PER_LINE);
+        const qty = Math.min(quantity, MAX_QTY_PER_LINE);
         // Conditional $set on the matching line — no full-doc round trip.
         const updated = await User.updateOne(
-            { _id: req.user._id, "cart.productId": productId },
-            { $set: { "cart.$[line].quantity": qty } },
-            { arrayFilters: [{ "line.productId": new mongoose.Types.ObjectId(productId) }] }
+            { _id: req.user._id, "cart.productId": pObjectId },
+            {
+                $set: {
+                    "cart.$[line].quantity": qty,
+                    "cart.$[line].updatedAt": new Date(),
+                },
+            },
+            { arrayFilters: [{ "line.productId": pObjectId }] }
         );
         if (updated.matchedCount === 0) {
             throw new AppError("This item is no longer in your cart. Please refresh.", 409);
@@ -159,27 +240,61 @@ const syncCart = asyncHandler(async (req, res) => {
 
     // Clean the payload; per-line merge stays on the server so a stale client
     // copy can never overwrite the authoritative cart wholesale.
-    const clean = items
+    const rawClean = items
         .filter((i) => i && typeof i.productId === "string" && mongoose.Types.ObjectId.isValid(i.productId))
         .map((i) => ({
             productId: i.productId,
             quantity: Math.min(Math.max(Number.isInteger(i.quantity) ? i.quantity : 1, 1), MAX_QTY_PER_LINE),
         }));
 
+    // Validate that products actually exist before syncing
+    const productIds = rawClean.map((i) => i.productId);
+    const existingProducts = await Product.find({ _id: { $in: productIds } }).select("_id");
+    const existingIdSet = new Set(existingProducts.map((p) => p._id.toString()));
+
+    const clean = rawClean.filter((i) => existingIdSet.has(i.productId));
+
     for (const guestItem of clean) {
-        // Existing line → take the higher quantity (never lose server data).
+        const pObjectId = new mongoose.Types.ObjectId(guestItem.productId);
+
+        // Existing line with lower quantity → take the higher quantity using $elemMatch
         const bumped = await User.updateOne(
-            { _id: req.user._id, "cart.productId": guestItem.productId, "cart.$[line].quantity": { $lt: guestItem.quantity } },
-            { $set: { "cart.$[line].quantity": guestItem.quantity } },
-            { arrayFilters: [{ "line.productId": new mongoose.Types.ObjectId(guestItem.productId) }] }
+            {
+                _id: req.user._id,
+                cart: {
+                    $elemMatch: {
+                        productId: pObjectId,
+                        quantity: { $lt: guestItem.quantity },
+                    },
+                },
+            },
+            {
+                $set: {
+                    "cart.$[line].quantity": guestItem.quantity,
+                    "cart.$[line].updatedAt": new Date(),
+                },
+            },
+            { arrayFilters: [{ "line.productId": pObjectId }] }
         );
-        if (bumped.modifiedCount === 0) {
-            // Either the line exists with >= qty, or it doesn't exist yet.
-            const exists = await User.exists({ _id: req.user._id, "cart.productId": guestItem.productId });
+
+        if (bumped.matchedCount === 0) {
+            // Either line exists with >= guestItem.quantity, or doesn't exist yet
+            const exists = await User.exists({
+                _id: req.user._id,
+                "cart.productId": pObjectId,
+            });
             if (!exists) {
                 await User.updateOne(
-                    { _id: req.user._id, "cart.productId": { $ne: guestItem.productId } },
-                    { $push: { cart: { productId: guestItem.productId, quantity: guestItem.quantity } } }
+                    { _id: req.user._id, "cart.productId": { $ne: pObjectId } },
+                    {
+                        $push: {
+                            cart: {
+                                productId: pObjectId,
+                                quantity: guestItem.quantity,
+                                updatedAt: new Date(),
+                            },
+                        },
+                    }
                 );
             }
         }

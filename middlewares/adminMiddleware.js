@@ -69,6 +69,7 @@ const adminProtect = async (req, res, next) => {
 
         // 5. Attach user to request
         req.user = user;
+        req.admin = user;
         next();
 
     } catch (error) {

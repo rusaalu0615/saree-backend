@@ -263,6 +263,97 @@ async function assignCourier(shipmentId, orderDetails = {}) {
     }
 }
 
+// Bounded cache for pincode serviceability checks
+const serviceabilityCache = new Map();
+const SERVICEABILITY_CACHE_TTL_MS = 15 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 500;
+
+/**
+ * Check delivery and COD serviceability for a delivery pincode.
+ * Distinguishes: serviceable (prepaid & COD), prepaid-only (COD unavailable),
+ * unserviceable (no couriers), and provider-unknown (provider down / network error).
+ */
+export async function checkPincodeServiceability(deliveryPincode, { weight = 0.5 } = {}) {
+    if (!deliveryPincode || !/^\d{6}$/.test(String(deliveryPincode).trim())) {
+        return { serviceable: false, codAvailable: false, outcome: "unserviceable", reason: "invalid_pincode" };
+    }
+    const cleanPin = String(deliveryPincode).trim();
+    const cacheKey = `${cleanPin}:${weight}`;
+    const now = Date.now();
+    const cached = serviceabilityCache.get(cacheKey);
+    if (cached && now - cached.timestamp < SERVICEABILITY_CACHE_TTL_MS) {
+        return cached.data;
+    }
+
+    const pickupPincode = process.env.SHIPROCKET_PICKUP_PINCODE || "812002";
+
+    try {
+        const prepaidParams = new URLSearchParams({
+            pickup_postcode: pickupPincode,
+            delivery_postcode: cleanPin,
+            weight: String(weight),
+            cod: "0",
+        });
+        const codParams = new URLSearchParams({
+            pickup_postcode: pickupPincode,
+            delivery_postcode: cleanPin,
+            weight: String(weight),
+            cod: "1",
+        });
+
+        const [prepaidRes, codRes] = await Promise.all([
+            shiprocketFetch(`/courier/serviceability/?${prepaidParams.toString()}`).catch((err) => ({ error: err.message })),
+            shiprocketFetch(`/courier/serviceability/?${codParams.toString()}`).catch((err) => ({ error: err.message })),
+        ]);
+
+        if (prepaidRes.error && codRes.error) {
+            return {
+                serviceable: null,
+                codAvailable: null,
+                outcome: "unknown",
+                reason: prepaidRes.error || codRes.error,
+            };
+        }
+
+        const prepaidCouriers = prepaidRes.data?.available_courier_companies || [];
+        const codCouriers = codRes.data?.available_courier_companies || [];
+
+        const serviceable = prepaidCouriers.length > 0 || codCouriers.length > 0;
+        const codAvailable = codCouriers.length > 0;
+
+        let outcome = "unserviceable";
+        if (serviceable && codAvailable) {
+            outcome = "serviceable";
+        } else if (serviceable && !codAvailable) {
+            outcome = "cod_unavailable";
+        }
+
+        const result = {
+            serviceable,
+            codAvailable,
+            outcome,
+            cheapestCourier: codCouriers[0]?.courier_name || prepaidCouriers[0]?.courier_name || null,
+        };
+
+        if (serviceabilityCache.size >= MAX_CACHE_ENTRIES) {
+            const firstKey = serviceabilityCache.keys().next().value;
+            serviceabilityCache.delete(firstKey);
+        }
+        serviceabilityCache.set(cacheKey, { timestamp: now, data: result });
+        return result;
+    } catch (err) {
+        console.error(`[Shiprocket] Serviceability check failed for ${cleanPin}:`, err.message);
+        return { serviceable: null, codAvailable: null, outcome: "unknown", reason: err.message };
+    }
+}
+
+/**
+ * Clear the serviceability cache (used by tests).
+ */
+export function clearServiceabilityCache() {
+    serviceabilityCache.clear();
+}
+
 /**
  * Track shipment by AWB code
  */
@@ -277,6 +368,49 @@ async function trackByShiprocketOrderId(shiprocketOrderId) {
     return await shiprocketFetch(
         `/courier/track?order_id=${shiprocketOrderId}`
     );
+}
+
+/**
+ * Classify Shiprocket order cancellation response into an explicit outcome:
+ * Returns: { outcome: "confirmed" | "failed" | "uncertain", statusCode?: number, message?: string, raw?: any, error?: string }
+ */
+export function classifyShiprocketCancelResponse(data) {
+    if (!data || typeof data !== "object" || Object.keys(data).length === 0) {
+        return { outcome: "uncertain", message: "empty_or_malformed_response", raw: data };
+    }
+
+    const statusCode = data.status_code !== undefined ? Number(data.status_code) : (data.status !== undefined && !isNaN(Number(data.status)) ? Number(data.status) : null);
+    const msg = String(data.message || data.errors || data.error || "").trim();
+
+    // Already cancelled is an affirmative confirmation that the order is cancelled
+    if (/already (?:been )?cancelled/i.test(msg)) {
+        return { outcome: "confirmed", statusCode: statusCode ?? 200, message: msg, raw: data };
+    }
+
+    // Explicit business rejection messages
+    const isRejectMessage = /cannot be cancelled|already shipped|already delivered|not found|invalid order|does not exist/i.test(msg);
+    const isClientError = statusCode !== null && statusCode >= 400 && statusCode < 500;
+
+    if (isRejectMessage || isClientError) {
+        return { outcome: "failed", statusCode: statusCode ?? 400, message: msg || "Shiprocket rejected cancellation", raw: data };
+    }
+
+    // Gateway server errors
+    if (statusCode !== null && statusCode >= 500) {
+        return { outcome: "uncertain", statusCode, message: msg || "Shiprocket server error", raw: data };
+    }
+
+    // Success requires affirmative evidence: successful status code AND explicit success message / flag
+    const isSuccessCode = statusCode === 200 || statusCode === 204;
+    const isSuccessMessage = /cancelled successfully|order cancelled|successfully cancelled/i.test(msg);
+    const hasAffirmativeEvidence = isSuccessMessage || data.success === true;
+
+    if (isSuccessCode && hasAffirmativeEvidence) {
+        return { outcome: "confirmed", statusCode, message: msg, raw: data };
+    }
+
+    // Ambiguous or missing status/evidence must NEVER default to confirmed
+    return { outcome: "uncertain", statusCode: statusCode ?? null, message: msg || "ambiguous_response", raw: data };
 }
 
 /**
@@ -296,29 +430,18 @@ async function cancelShiprocketOrder(shiprocketOrderIds) {
         });
     } catch (err) {
         const msg = String(err.message || err);
-        // Distinguish definite rejections (e.g. 400/404/422/already shipped) from uncertain network/timeout errors
+        // Distinguish definite rejections from uncertain network/timeout errors
         const isTransient = /timeout|network|socket|econn|etimedout|abort|fetch failed|5\d\d/i.test(msg);
         if (isTransient) {
             return { outcome: "uncertain", error: msg };
         }
+        if (/already (?:been )?cancelled/i.test(msg)) {
+            return { outcome: "confirmed", message: msg, error: msg };
+        }
         return { outcome: "failed", error: msg };
     }
 
-    // Inspect response: Shiprocket can return HTTP 200 with status_code: 400 or message indicating failure
-    const statusCode = data?.status_code ?? data?.status ?? 200;
-    const msg = String(data?.message || data?.errors || "");
-    const isSuccessCode = statusCode === 200 || statusCode === 204;
-    const isSuccessMessage = /cancelled successfully|order cancelled/i.test(msg);
-    const isRejectMessage = /cannot be cancelled|already shipped|already delivered|not found|invalid/i.test(msg);
-
-    if (isSuccessCode && !isRejectMessage) {
-        return { outcome: "confirmed", statusCode, message: msg, raw: data };
-    }
-    if (isRejectMessage || (statusCode >= 400 && statusCode < 500)) {
-        return { outcome: "failed", statusCode, message: msg, raw: data };
-    }
-
-    return { outcome: "uncertain", statusCode, message: msg, raw: data };
+    return classifyShiprocketCancelResponse(data);
 }
 
 /**
@@ -415,5 +538,8 @@ export default {
     trackByShiprocketOrderId,
     findShipmentByOurOrderId,
     cancelShiprocketOrder,
+    classifyShiprocketCancelResponse,
     generatePickup,
+    checkPincodeServiceability,
+    clearServiceabilityCache,
 };

@@ -8,6 +8,15 @@ import crypto from "crypto";
 // backtracking pattern like "(a+)+" that would DoS the Mongo regex engine.
 export const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// Neutralize HTML/XSS injection characters
+export const escapeHtml = (s) =>
+    String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+
 /**
  * Timing-safe string comparison that CANNOT throw: both inputs are reduced to
  * fixed-length SHA-256 digests before crypto.timingSafeEqual, so malformed,

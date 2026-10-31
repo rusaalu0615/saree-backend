@@ -44,7 +44,9 @@ import {
     backoffDate,
 } from "../services/orderLifecycle.js";
 import { runFulfillmentSweep } from "../services/fulfillmentWorker.js";
+import { runCancellationSweep } from "../services/cancellationWorker.js";
 import { runEmailSweep } from "../services/emailWorker.js";
+import { runTrackingSweep } from "../services/trackingWorker.js";
 import { settleCartAfterPayment } from "../services/cartSettlement.js";
 import { findExistingGatewayOrder, GATEWAY_LOOKUP_OUTCOME } from "../services/gatewayOrder.js";
 
@@ -477,8 +479,10 @@ async function runSweepOnce() {
         try { await replayWebhookEvents(); } catch (e) { console.error("[Sweeper] replayWebhookEvents error:", e.message); }
         try { await reconcileUnsettledPaidCarts(); } catch (e) { console.error("[Sweeper] reconcileUnsettledPaidCarts error:", e.message); }
         try { await runFulfillmentSweep(BATCH); } catch (e) { console.error("[Sweeper] runFulfillmentSweep error:", e.message); }
+        try { await runCancellationSweep(BATCH); } catch (e) { console.error("[Sweeper] runCancellationSweep error:", e.message); }
         try { await reconcileRefunds(); } catch (e) { console.error("[Sweeper] reconcileRefunds error:", e.message); }
         try { await runEmailSweep(BATCH); } catch (e) { console.error("[Sweeper] runEmailSweep error:", e.message); }
+        try { await runTrackingSweep(BATCH); } catch (e) { console.error("[Sweeper] runTrackingSweep error:", e.message); }
     } catch (err) {
         console.error("[Sweeper] tick error:", err.message);
     } finally {

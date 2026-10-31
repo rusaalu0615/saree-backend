@@ -12,7 +12,7 @@ import invoiceService from "../services/invoiceService.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import razorpayInstance from "../config/razorpay.js";
-import { safeCompare, hashToken, toPaise, toRupees } from "../utils/security.js";
+import { safeCompare, hashToken, toPaise, toRupees, escapeRegex } from "../utils/security.js";
 import { ensureGatewayOrder } from "../services/gatewayOrder.js";
 import { settleCartAfterPayment, applyCodCartAndAddress } from "../services/cartSettlement.js";
 import { executeOrderTransition } from "../services/orderTransitions.js";
@@ -42,6 +42,13 @@ import {
     scheduleFulfillment,
 } from "../services/orderLifecycle.js";
 import { runFulfillmentForOrder } from "../services/fulfillmentWorker.js";
+import {
+    evaluateCancellationEligibility,
+    buildCustomerCancellationSummary,
+    buildCustomerRefundSummary,
+    processOrderCancellation,
+    calculateCancellationRefund,
+} from "../services/orderCancellation.js";
 import {
     mapShipmentStatus,
     normalizeTrackingResult,
@@ -179,6 +186,17 @@ const createOrder = asyncHandler(async (req, res) => {
     // misconfigured gateway can never strand orders holding stock.
     if (paymentMethod !== "cod" && !razorpayInstance) {
         throw new AppError("Payment gateway is not configured. Please use Cash on Delivery or contact the store.", 503);
+    }
+
+    // Backend-owned delivery & COD serviceability check before commitment
+    const pinCheck = await shiprocket.checkPincodeServiceability(shippingAddress.pincode, {
+        weight: 0.5,
+    });
+    if (pinCheck.serviceable === false) {
+        throw new AppError(`Delivery is currently not available for PIN code ${shippingAddress.pincode}.`, 400);
+    }
+    if (paymentMethod === "cod" && pinCheck.codAvailable === false) {
+        throw new AppError(`Cash on Delivery is not available for PIN code ${shippingAddress.pincode}. Please select an online payment method.`, 400);
     }
 
     // Canonical payload used for idempotent-retry comparison. The recovery
@@ -432,6 +450,11 @@ const createOrder = asyncHandler(async (req, res) => {
                 couponCode: appliedCouponCode,
                 total: toRupees(totalPaise),
             },
+            codAccounting: cod ? {
+                amountDuePaise: totalPaise,
+                collectedAtDelivery: false,
+                remittanceStatus: "none",
+            } : undefined,
             status: "placed",
             timeline: [{ status: "Order Placed", description: "Your order has been placed successfully" }],
         });
@@ -1416,7 +1439,7 @@ export { normalizeTrackingResult, sanitizeTrackingForPublic, mapShipmentStatus, 
  * courier reports a genuinely newer stage. Never downgrades; never touches
  * cancelled/returned orders; no-op when nothing changed.
  */
-async function syncOrderFromShipment(orderDoc, trackingPayload) {
+export async function syncOrderFromShipment(orderDoc, trackingPayload) {
     try {
         if (!trackingPayload || ["cancelled", "returned"].includes(orderDoc.status) || ["requested", "completed"].includes(orderDoc.cancellation?.status)) return;
         const n = normalizeTrackingResult(trackingPayload);
@@ -1457,6 +1480,15 @@ async function syncOrderFromShipment(orderDoc, trackingPayload) {
             orderDoc.status = mapped;
             if (newRank >= STATUS_RANK.shipped && orderDoc.reservation?.state === "held") {
                 orderDoc.reservation.state = "return_pending";
+            }
+            if (mapped === "delivered" && orderDoc.payment?.method === "cod") {
+                orderDoc.codAccounting = orderDoc.codAccounting || {};
+                orderDoc.codAccounting.collectedAtDelivery = true;
+                orderDoc.codAccounting.collectedAmountPaise = Math.round(Number(orderDoc.pricing?.total || 0) * 100);
+                orderDoc.codAccounting.collectedAt = new Date();
+                if (orderDoc.codAccounting.remittanceStatus === "none" || !orderDoc.codAccounting.remittanceStatus) {
+                    orderDoc.codAccounting.remittanceStatus = "pending";
+                }
             }
             orderDoc.timeline.push({
                 status: mapped.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase()),
@@ -1499,9 +1531,19 @@ const getUserOrders = asyncHandler(async (req, res) => {
         Order.countDocuments({ user: req.user._id, isGuest: { $ne: true } }),
     ]);
 
+    const enrichedOrders = orders.map((order) => {
+        const o = order.toObject ? order.toObject() : { ...order };
+        const eligibility = evaluateCancellationEligibility(o, { isCustomer: true });
+        o.canCancel = eligibility.canCancel;
+        o.cannotCancelReason = eligibility.cannotCancelReason;
+        o.cancellationSummary = buildCustomerCancellationSummary(o);
+        o.refundSummary = buildCustomerRefundSummary(o);
+        return o;
+    });
+
     res.status(200).json({
         success: true,
-        orders,
+        orders: enrichedOrders,
         pagination: { page, limit, totalCount: total, totalPages: Math.ceil(total / limit) },
     });
 });
@@ -1514,7 +1556,64 @@ const getOrderById = asyncHandler(async (req, res) => {
 
     if (!order) throw new AppError("Order not found", 404);
 
-    res.status(200).json({ success: true, order });
+    const o = order.toObject ? order.toObject() : { ...order };
+    const eligibility = evaluateCancellationEligibility(o, { isCustomer: true });
+    o.canCancel = eligibility.canCancel;
+    o.cannotCancelReason = eligibility.cannotCancelReason;
+    o.cancellationSummary = buildCustomerCancellationSummary(o);
+    o.refundSummary = buildCustomerRefundSummary(o);
+
+    res.status(200).json({ success: true, order: o });
+});
+
+/**
+ * POST /api/order/:id/cancel — Customer cancellation endpoint
+ */
+const cancelUserOrder = asyncHandler(async (req, res) => {
+    const { reason, details } = req.body || {};
+    if (!reason || typeof reason !== "string" || !reason.trim()) {
+        throw new AppError("A cancellation reason is required.", 400);
+    }
+    const cleanReason = String(reason).trim().slice(0, 200);
+    const cleanDetails = details ? String(details).trim().slice(0, 500) : "";
+    const fullReason = cleanDetails ? `${cleanReason}: ${cleanDetails}` : cleanReason;
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        throw new AppError("Order not found", 404);
+    }
+
+    // Resolve order with BOTH order ID AND authenticated owner ID
+    const order = await Order.findOne({
+        _id: req.params.id,
+        user: req.user._id,
+        isGuest: { $ne: true },
+    });
+    if (!order) {
+        throw new AppError("Order not found", 404);
+    }
+
+    const result = await processOrderCancellation(order._id, {
+        reason: fullReason,
+        cancelledBy: "customer",
+        actorId: req.user._id,
+    });
+
+    const eligibility = evaluateCancellationEligibility(result.order, { isCustomer: true });
+    const orderSummary = result.order.toObject ? result.order.toObject() : { ...result.order };
+    orderSummary.canCancel = eligibility.canCancel;
+    orderSummary.cannotCancelReason = eligibility.cannotCancelReason;
+    orderSummary.cancellationSummary = buildCustomerCancellationSummary(result.order);
+    orderSummary.refundSummary = buildCustomerRefundSummary(result.order);
+
+    res.status(200).json({
+        success: true,
+        finalized: result.finalized,
+        confirmationPending: result.confirmationPending || false,
+        alreadyCancelled: result.alreadyCancelled || false,
+        courierOutcome: result.courierOutcome,
+        refund: orderSummary.refundSummary,
+        message: result.message,
+        order: orderSummary,
+    });
 });
 
 /** GET /api/order/:id/track — live tracking (owner) */
@@ -1674,30 +1773,76 @@ const trackOrderPublic = asyncHandler(async (req, res) => {
 // ADMIN ENDPOINTS
 // ---------------------------------------------------------------------------
 
-/** GET /api/order/admin/all — all orders */
+/** GET /api/order/admin/all — all orders with search, status filter, and pagination */
 const getAllOrders = asyncHandler(async (req, res) => {
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
     const skip = (page - 1) * limit;
     const status = req.query.status;
 
-    const filter = {};
-    if (status) filter.status = status;
+    const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim() : (typeof req.query.q === 'string' ? req.query.q.trim() : '');
+    const search = escapeRegex(rawSearch);
+
+    const andClauses = [];
+
+    // Status filter
+    if (status && status !== 'all') {
+        if (status === 'hold') {
+            andClauses.push({ 'fulfillmentHold.active': true });
+        } else {
+            andClauses.push({ status });
+        }
+    }
+
+    // Search filter across order ID, recipient name/email/phone, gateway ID, and user account
+    if (search) {
+        const searchRegex = new RegExp(search, 'i');
+        let matchingUserIds = [];
+        try {
+            const matchingUsers = await User.find({
+                $or: [
+                    { name: searchRegex },
+                    { email: searchRegex },
+                    { phone: searchRegex },
+                ],
+            }).select('_id').lean();
+            matchingUserIds = matchingUsers.map((u) => u._id);
+        } catch (e) {
+            matchingUserIds = [];
+        }
+
+        const searchOr = [
+            { orderId: searchRegex },
+            { 'shippingAddress.firstName': searchRegex },
+            { 'shippingAddress.lastName': searchRegex },
+            { 'shippingAddress.email': searchRegex },
+            { 'shippingAddress.phone': searchRegex },
+            { 'payment.razorpayPaymentId': searchRegex },
+        ];
+
+        if (matchingUserIds.length > 0) {
+            searchOr.push({ user: { $in: matchingUserIds } });
+        }
+
+        andClauses.push({ $or: searchOr });
+    }
+
+    const filter = andClauses.length > 0 ? { $and: andClauses } : {};
 
     const [orders, total] = await Promise.all([
         Order.find(filter)
-            .sort({ createdAt: -1 })
+            .sort({ createdAt: -1, _id: -1 })
             .skip(skip)
             .limit(limit)
-            .populate("user", "name email phone")
-            .select("-__v -payment.checkoutTokenHash -payment.razorpaySignature"),
+            .populate('user', 'name email phone')
+            .select('-__v -payment.checkoutTokenHash -payment.razorpaySignature'),
         Order.countDocuments(filter),
     ]);
 
     res.status(200).json({
         success: true,
         orders,
-        pagination: { page, limit, totalCount: total, totalPages: Math.ceil(total / limit) },
+        pagination: { page, limit, totalCount: total, totalPages: Math.max(1, Math.ceil(total / limit)) },
     });
 });
 
@@ -1721,144 +1866,25 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 });
 
 /**
- * POST /api/order/admin/:id/cancel — cancel with EXPLICIT lifecycle steps:
- * intent → courier outcome → refund (only on clear outcomes) → inventory release
- * (by reservation.state) → completion. Cancellation intent never means the
- * courier stopped the parcel, and a dispatched parcel's stock waits for a
- * verified physical return instead of being force-restocked.
+ * POST /api/order/admin/:id/cancel — cancel with EXPLICIT lifecycle steps via shared service
  */
 const cancelOrder = asyncHandler(async (req, res) => {
     const order = await Order.findById(req.params.id);
     if (!order) throw new AppError("Order not found", 404);
 
-    if (order.status === "returned") {
-        throw new AppError("Returned orders cannot be cancelled.", 400);
-    }
-    if (order.status === "delivered") {
-        throw new AppError("Delivered orders cannot be cancelled.", 400);
-    }
-    if (order.status === "cancelled" || order.cancellation?.status === "completed") {
-        return res.status(200).json({
-            success: true,
-            order,
-            message: "Order is already cancelled.",
-        });
-    }
+    const result = await processOrderCancellation(order._id, {
+        reason: req.body.reason || "Order cancelled by admin",
+        cancelledBy: "admin",
+        actorId: req.user?._id || null,
+    });
 
-    // 1. Record cancellation INTENT (idempotent atomic claim).
-    await requestCancellation(order._id, { reason: req.body.reason || "Order cancelled by admin" });
-
-    // 2. Ask the courier — persist the OUTCOME separately;
-    // Only use "not_needed" when there is reliable evidence no shipment exists and none is in flight.
-    let courierOutcome = "not_needed";
-    const hasShipment = !!order.shiprocket?.orderId;
-    const isFulfillmentActive =
-        ["create_uncertain", "needs_reconciliation"].includes(order.fulfillment?.stage) ||
-        (order.fulfillment?.lockUntil && new Date(order.fulfillment.lockUntil) > new Date());
-
-    if (hasShipment) {
-        const cancelResult = await shiprocket.cancelShiprocketOrder(order.shiprocket.orderId);
-        courierOutcome = cancelResult.outcome; // "confirmed" | "failed" | "uncertain"
-        if (courierOutcome === "uncertain") {
-            await Order.updateOne(
-                { _id: order._id },
-                {
-                    $push: {
-                        timeline: {
-                            status: "Courier Cancel Uncertain",
-                            description: `Shiprocket cancel returned uncertain (${cancelResult.error || cancelResult.message || "Timeout/Network"}) — verify on courier portal before assuming parcel stopped.`,
-                            date: new Date(),
-                        },
-                    },
-                }
-            );
-        } else if (courierOutcome === "failed") {
-            await Order.updateOne(
-                { _id: order._id },
-                {
-                    $push: {
-                        timeline: {
-                            status: "Courier Cancel Failed",
-                            description: `Shiprocket refused cancellation (${cancelResult.message || cancelResult.error || "Parcel already dispatched"}).`,
-                            date: new Date(),
-                        },
-                    },
-                }
-            );
-        }
-    } else if (isFulfillmentActive) {
-        courierOutcome = "uncertain";
-        await Order.updateOne(
-            { _id: order._id },
-            {
-                $set: { "fulfillment.stage": "needs_reconciliation" },
-                $push: {
-                    timeline: {
-                        status: "Cancellation Pending Reconciliation",
-                        description: "Fulfillment creation in progress; courier status uncertain pending reconciliation.",
-                        date: new Date(),
-                    },
-                },
-            }
-        );
-    } else {
-        courierOutcome = "not_needed";
-    }
-
-    await recordCourierOutcome(order._id, courierOutcome);
-
-    // 3. Inventory: release held reservation ONLY on verified provider stop or not_needed.
-    // Uncertain or failed courier outcomes MUST retain the inventory hold!
-    let releasedReservation = false;
-    if (courierOutcome === "confirmed" || courierOutcome === "not_needed") {
-        const relRes = await releaseReservation(order._id, { reason: "cancelled" });
-        releasedReservation = relRes.released;
-    }
-
-    // 4. Auto-refund real capture ONLY on clear outcomes.
-    let refund = null;
-    if (order.payment.status === "paid") {
-        if (courierOutcome === "not_needed" || courierOutcome === "confirmed") {
-            try {
-                refund = await refundPaidOrder(await Order.findById(order._id), req.body.reason || "Order cancelled");
-            } catch (rErr) {
-                await Order.updateOne({ _id: order._id }, { $push: { timeline: { status: "Refund Pending", description: "Order cancelled but the refund needs reconciliation — use the admin refund action. " + String(rErr.message).slice(0, 120), date: new Date() } } });
-            }
-        } else {
-            await Order.updateOne({ _id: order._id }, { $push: { timeline: { status: "Refund Held", description: "Courier cancellation unconfirmed — refund deferred until the parcel stop is verified (admin refund action).", date: new Date() } } });
-        }
-    }
-
-    // 5. Finalize cancellation ONLY when confirmed or not_needed.
-    // For uncertain or failed outcomes, retain hold and leave cancellation in "requested".
-    let finalized = false;
-    if (courierOutcome === "confirmed" || courierOutcome === "not_needed") {
-        await completeCancellation(order._id);
-        await enqueueShippingEmail(order._id, "cancelled");
-        finalized = true;
-    } else {
-        await Order.updateOne(
-            { _id: order._id },
-            {
-                $set: {
-                    "fulfillmentHold.active": true,
-                    "fulfillmentHold.reason": `Cancellation unconfirmed (${courierOutcome})`,
-                    "fulfillmentHold.placedAt": new Date(),
-                },
-            }
-        );
-    }
-
-    const fresh = await Order.findById(order._id);
     res.status(200).json({
         success: true,
-        order: fresh,
-        refund,
-        courierCancel: courierOutcome,
-        finalized,
-        message: finalized
-            ? (refund ? `Order cancelled — refund ${refund.status}` : "Order cancelled")
-            : (courierOutcome === "failed" ? "Order cannot be cancelled: parcel is already with courier or dispatched." : "Order cancellation requested — courier verification required."),
+        order: result.order,
+        refund: result.refund,
+        courierCancel: result.courierOutcome,
+        finalized: result.finalized,
+        message: result.message,
     });
 });
 
@@ -1915,6 +1941,230 @@ const adminPushToShiprocket = asyncHandler(async (req, res) => {
     });
 });
 
+/**
+ * GET /api/order/check-serviceability?pincode=...&cod=...
+ * Public serviceability check endpoint for frontend / customer checkout.
+ */
+const checkDeliveryServiceability = asyncHandler(async (req, res) => {
+    const { pincode, cod } = req.query;
+    if (!pincode) {
+        throw new AppError("PIN code is required.", 400);
+    }
+    const isCod = cod === "true" || cod === "1";
+    const result = await shiprocket.checkPincodeServiceability(pincode, { isCod });
+    res.status(200).json({
+        success: true,
+        pincode: String(pincode).trim(),
+        ...result,
+    });
+});
+
+/**
+ * POST /api/order/admin/:id/cod-reconcile
+ * Admin endpoint to explicitly reconcile COD cash collection and courier remittance.
+ */
+const codReconcileOrder = asyncHandler(async (req, res) => {
+    const { action, amount, utr, notes, discrepancyReason } = req.body || {};
+    if (!["confirm_remittance", "record_discrepancy", "confirm_collection"].includes(action)) {
+        throw new AppError("Valid action ('confirm_remittance', 'record_discrepancy', 'confirm_collection') is required.", 400);
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) throw new AppError("Order not found", 404);
+    if (order.payment?.method !== "cod") {
+        throw new AppError("Only Cash on Delivery (COD) orders can be reconciled through this workflow.", 400);
+    }
+
+    const adminEmail = req.admin?.email || req.user?.email || "admin";
+    order.codAccounting = order.codAccounting || {
+        amountDuePaise: toPaise(order.pricing?.total || 0),
+        remittanceStatus: "none",
+    };
+
+    if (action === "confirm_collection") {
+        order.codAccounting.collectedAtDelivery = true;
+        order.codAccounting.collectedAmountPaise = toPaise(amount ?? order.pricing?.total ?? 0);
+        order.codAccounting.collectedAt = new Date();
+        order.codAccounting.reconciledBy = adminEmail;
+        if (notes) order.codAccounting.notes = notes;
+        order.timeline.push({
+            status: "COD Cash Collection Confirmed",
+            description: `Cash collection of ₹${toRupees(order.codAccounting.collectedAmountPaise)} confirmed by ${adminEmail}.${notes ? " Notes: " + notes : ""}`,
+            date: new Date(),
+        });
+    } else if (action === "confirm_remittance") {
+        const remittedPaise = amount !== undefined ? toPaise(amount) : (order.codAccounting.amountDuePaise || toPaise(order.pricing?.total || 0));
+        order.codAccounting.remittanceStatus = "remitted";
+        order.codAccounting.remittedAmountPaise = remittedPaise;
+        order.codAccounting.remittedAt = new Date();
+        order.codAccounting.utr = utr ? String(utr).trim() : undefined;
+        order.codAccounting.reconciledBy = adminEmail;
+        if (notes) order.codAccounting.notes = notes;
+        // Bank funds are verified received: mark payment paid
+        order.payment.status = "paid";
+        order.payment.amountPaid = remittedPaise;
+        order.timeline.push({
+            status: "COD Remittance Confirmed",
+            description: `Courier remittance of ₹${toRupees(remittedPaise)} verified in bank by ${adminEmail}.${utr ? " UTR: " + utr : ""}${notes ? " Notes: " + notes : ""}`,
+            date: new Date(),
+        });
+    } else if (action === "record_discrepancy") {
+        if (!discrepancyReason) {
+            throw new AppError("A reason is required when recording a remittance discrepancy.", 400);
+        }
+        order.codAccounting.remittanceStatus = "discrepancy";
+        order.codAccounting.discrepancyReason = String(discrepancyReason).trim();
+        order.codAccounting.reconciledBy = adminEmail;
+        if (notes) order.codAccounting.notes = notes;
+        order.timeline.push({
+            status: "COD Remittance Discrepancy",
+            description: `Discrepancy recorded by ${adminEmail}: ${discrepancyReason}`,
+            date: new Date(),
+        });
+    }
+
+    await order.save();
+    res.status(200).json({
+        success: true,
+        message: `COD order reconciled (${action}).`,
+        order,
+    });
+});
+
+/**
+ * POST /api/order/admin/:id/confirm-return
+ * Explicit audited physical return receipt confirmation.
+ * Restores product stock exactly once if restock is true.
+ */
+const confirmReturnOrder = asyncHandler(async (req, res) => {
+    const { restock = true, condition = "intact", notes } = req.body || {};
+    const order = await Order.findById(req.params.id);
+    if (!order) throw new AppError("Order not found", 404);
+
+    const adminEmail = req.admin?.email || req.user?.email || "admin";
+
+    if (!restock || condition === "damaged" || condition === "defective") {
+        order.returnInfo = order.returnInfo || {};
+        order.returnInfo.status = "confirmed";
+        order.returnInfo.confirmedAt = new Date();
+        order.returnInfo.stockRestored = false;
+        order.status = "returned";
+        const reasonDesc = `Physical return received by ${adminEmail} (condition: ${condition}, non-restocked).${notes ? " Notes: " + notes : ""}`;
+        order.timeline.push({
+            status: "Physical Return Confirmed (No Restock)",
+            description: reasonDesc,
+            date: new Date(),
+        });
+        await order.save();
+        return res.status(200).json({
+            success: true,
+            stockRestored: false,
+            message: "Physical return recorded without restocking.",
+            order,
+        });
+    }
+
+    const result = await confirmPhysicalReturn(order._id, {
+        description: `Physical return verified and restocked by ${adminEmail}.${notes ? " Notes: " + notes : ""}`,
+    });
+
+    const fresh = await Order.findById(order._id);
+    res.status(200).json({
+        success: true,
+        stockRestored: !result.alreadyRestored,
+        alreadyRestored: result.alreadyRestored || false,
+        message: result.alreadyRestored
+            ? "Physical return was already previously confirmed and restocked."
+            : "Physical return confirmed and inventory restored.",
+        order: fresh,
+    });
+});
+
+/**
+ * POST /api/order/admin/:id/resolve-hold
+ * Explicit administrative review and resolution for fulfillment holds.
+ */
+const resolveHoldOrder = asyncHandler(async (req, res) => {
+    const { action = "clear_hold", notes } = req.body || {};
+    const order = await Order.findById(req.params.id);
+    if (!order) throw new AppError("Order not found", 404);
+
+    if (!order.fulfillmentHold?.active) {
+        return res.status(200).json({ success: true, message: "No active hold on this order.", order });
+    }
+
+    const adminEmail = req.admin?.email || req.user?.email || "admin";
+
+    if (action === "cancel_order") {
+        const cancelResult = await processOrderCancellation(order._id, {
+            reason: notes || "Cancelled by admin after fulfillment hold review",
+            cancelledBy: "admin",
+            actorId: req.user?._id || null,
+        });
+        return res.status(200).json({
+            success: true,
+            message: "Order cancelled following hold resolution.",
+            order: cancelResult.order,
+        });
+    }
+
+    // Clear hold
+    order.fulfillmentHold.active = false;
+    order.fulfillmentHold.reallocationOutcome = "success";
+    order.timeline.push({
+        status: "Fulfillment Hold Resolved",
+        description: `Hold cleared by ${adminEmail}.${notes ? " Notes: " + notes : ""}`,
+        date: new Date(),
+    });
+    await order.save();
+
+    res.status(200).json({
+        success: true,
+        message: "Fulfillment hold cleared successfully.",
+        order,
+    });
+});
+
+/**
+ * POST /api/order/shiprocket-webhook
+ * Inbound authenticated provider webhook for real-time tracking updates.
+ */
+const handleShiprocketWebhook = asyncHandler(async (req, res) => {
+    const payload = req.body;
+    if (!payload) {
+        return res.status(400).json({ success: false, message: "Empty webhook payload" });
+    }
+
+    const webhookToken = process.env.SHIPROCKET_WEBHOOK_TOKEN;
+    if (webhookToken) {
+        const incomingToken = req.headers["x-api-key"] || req.query.token;
+        if (incomingToken !== webhookToken) {
+            return res.status(401).json({ success: false, message: "Unauthorized webhook" });
+        }
+    }
+
+    const awb = payload.awb || payload.awb_code || payload.tracking_data?.shipment_track?.[0]?.awb_code;
+    const srOrderId = payload.order_id || payload.sr_order_id;
+
+    if (!awb && !srOrderId) {
+        return res.status(200).json({ success: true, message: "Ignored payload with no tracking identifier" });
+    }
+
+    const order = await Order.findOne({
+        $or: [
+            ...(awb ? [{ "shiprocket.awbCode": awb }] : []),
+            ...(srOrderId ? [{ "shiprocket.orderId": srOrderId }] : []),
+        ],
+    });
+
+    if (!order) {
+        return res.status(200).json({ success: true, message: "No matching order found" });
+    }
+
+    await syncOrderFromShipment(order, payload);
+    res.status(200).json({ success: true, processed: true, orderId: order.orderId });
+});
+
 export default {
     createOrder,
     getUserOrders,
@@ -1924,10 +2174,18 @@ export default {
     getAllOrders,
     updateOrderStatus,
     cancelOrder,
+    cancelUserOrder,
     adminRefundOrder,
     adminPushToShiprocket,
+
+
     verifyPayment,
     handleRazorpayWebhook,
+    checkDeliveryServiceability,
+    codReconcileOrder,
+    confirmReturnOrder,
+    resolveHoldOrder,
+    handleShiprocketWebhook,
 };
 
 // Shared with the reservation sweeper (internal job, no public HTTP surface).

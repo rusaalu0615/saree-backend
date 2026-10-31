@@ -9,8 +9,149 @@ import { escapeRegex } from "../utils/security.js";
 // ============================================================
 
 /**
+ * Helper to compute accounting metrics for an order filter match
+ */
+const buildAccountingPipeline = (matchFilter = {}) => [
+    { $match: matchFilter },
+    {
+        $facet: {
+            // 1. Gross Order Value: total of non-cancelled orders
+            gross: [
+                { $match: { status: { $ne: "cancelled" } } },
+                { $group: { _id: null, total: { $sum: "$pricing.total" } } },
+            ],
+            // 2. Captured Prepaid: prepaid orders where payment was captured
+            prepaid: [
+                {
+                    $match: {
+                        "payment.method": { $ne: "cod" },
+                        "payment.status": { $in: ["paid", "refunded"] },
+                    },
+                },
+                {
+                    $group: {
+                        _id: null,
+                        total: {
+                            $sum: {
+                                $ifNull: [
+                                    "$payment.amountPaid",
+                                    {
+                                        $ifNull: [
+                                            { $divide: ["$payment.amount", 100] },
+                                            "$pricing.total",
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+            ],
+            // 3. Confirmed COD Collected: COD orders collected at delivery
+            codCollected: [
+                {
+                    $match: {
+                        "payment.method": "cod",
+                        $or: [
+                            { "codAccounting.collectedAtDelivery": true },
+                            { "payment.status": "paid" },
+                        ],
+                    },
+                },
+                {
+                    $group: {
+                        _id: null,
+                        total: {
+                            $sum: {
+                                $cond: [
+                                    { $gt: [{ $ifNull: ["$codAccounting.collectedAmountPaise", 0] }, 0] },
+                                    { $divide: ["$codAccounting.collectedAmountPaise", 100] },
+                                    "$pricing.total",
+                                ],
+                            },
+                        },
+                    },
+                },
+            ],
+            // 4. Processed Refunds: refunds actually processed
+            refunds: [
+                {
+                    $match: {
+                        $or: [
+                            { "payment.refundedAmount": { $gt: 0 } },
+                            { "refund.status": "processed" },
+                        ],
+                    },
+                },
+                {
+                    $group: {
+                        _id: null,
+                        total: {
+                            $sum: {
+                                $cond: [
+                                    { $gt: [{ $ifNull: ["$payment.refundedAmount", 0] }, 0] },
+                                    "$payment.refundedAmount",
+                                    {
+                                        $cond: [
+                                            { $eq: ["$refund.status", "processed"] },
+                                            { $divide: [{ $ifNull: ["$refund.amountPaise", 0] }, 100] },
+                                            0,
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+            ],
+            // 5. COD Receivable / Remittance Pending: cash collected from customer, awaiting courier payout
+            codReceivable: [
+                {
+                    $match: {
+                        "payment.method": "cod",
+                        "codAccounting.remittanceStatus": "pending",
+                    },
+                },
+                {
+                    $group: {
+                        _id: null,
+                        total: {
+                            $sum: {
+                                $cond: [
+                                    { $gt: [{ $ifNull: ["$codAccounting.amountDuePaise", 0] }, 0] },
+                                    { $divide: ["$codAccounting.amountDuePaise", 100] },
+                                    "$pricing.total",
+                                ],
+                            },
+                        },
+                    },
+                },
+            ],
+        },
+    },
+];
+
+const extractAccounting = (facetResult) => {
+    const gross = facetResult?.gross?.[0]?.total || 0;
+    const prepaid = facetResult?.prepaid?.[0]?.total || 0;
+    const cod = facetResult?.codCollected?.[0]?.total || 0;
+    const refunds = facetResult?.refunds?.[0]?.total || 0;
+    const codReceivable = facetResult?.codReceivable?.[0]?.total || 0;
+    const netCollected = Math.max(0, prepaid + cod - refunds);
+
+    return {
+        grossOrderValue: Math.round(gross * 100) / 100,
+        capturedPrepaid: Math.round(prepaid * 100) / 100,
+        confirmedCodCollected: Math.round(cod * 100) / 100,
+        processedRefunds: Math.round(refunds * 100) / 100,
+        netCollectedAmount: Math.round(netCollected * 100) / 100,
+        codRemittancePending: Math.round(codReceivable * 100) / 100,
+    };
+};
+
+/**
  * GET /api/admin/stats — Dashboard overview stats
- * Returns: total revenue, order count, customer count, product stats
+ * Distinguishes Gross Order Value from Net Collected Amount
  */
 const getDashboardStats = asyncHandler(async (req, res) => {
     const now = new Date();
@@ -18,11 +159,10 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
 
-    // Run all queries in parallel for speed
     const [
-        totalRevenue,
-        thisMonthRevenue,
-        lastMonthRevenue,
+        allTimeFinancials,
+        thisMonthFinancials,
+        lastMonthFinancials,
         totalOrders,
         thisMonthOrders,
         lastMonthOrders,
@@ -33,39 +173,29 @@ const getDashboardStats = asyncHandler(async (req, res) => {
         lowStockProducts,
         outOfStockProducts,
     ] = await Promise.all([
-        // Revenue
-        Order.aggregate([
-            { $match: { status: { $ne: "cancelled" } } },
-            { $group: { _id: null, total: { $sum: "$pricing.total" } } },
-        ]),
-        Order.aggregate([
-            { $match: { createdAt: { $gte: thisMonthStart }, status: { $ne: "cancelled" } } },
-            { $group: { _id: null, total: { $sum: "$pricing.total" } } },
-        ]),
-        Order.aggregate([
-            { $match: { createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd }, status: { $ne: "cancelled" } } },
-            { $group: { _id: null, total: { $sum: "$pricing.total" } } },
-        ]),
-        // Orders
+        Order.aggregate(buildAccountingPipeline({})),
+        Order.aggregate(buildAccountingPipeline({ createdAt: { $gte: thisMonthStart } })),
+        Order.aggregate(buildAccountingPipeline({ createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } })),
         Order.countDocuments(),
         Order.countDocuments({ createdAt: { $gte: thisMonthStart } }),
         Order.countDocuments({ createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
-        Order.countDocuments({ status: { $in: ["placed", "confirmed", "processing", "shipped", "in_transit", "out_for_delivery"] } }),
-        // Customers
+        Order.countDocuments({
+            status: { $in: ["placed", "confirmed", "processing", "shipped", "in_transit", "out_for_delivery"] },
+        }),
         User.countDocuments(),
         User.countDocuments({ createdAt: { $gte: thisMonthStart } }),
-        // Products
         Product.countDocuments(),
         Product.countDocuments({ stock: { $gt: 0, $lte: 10 } }),
         Product.countDocuments({ stock: 0 }),
     ]);
 
-    const totalRev = totalRevenue[0]?.total || 0;
-    const thisMonthRev = thisMonthRevenue[0]?.total || 0;
-    const lastMonthRev = lastMonthRevenue[0]?.total || 0;
-    const revenueGrowth = lastMonthRev > 0
-        ? (((thisMonthRev - lastMonthRev) / lastMonthRev) * 100).toFixed(1)
-        : thisMonthRev > 0 ? "100" : "0";
+    const allTime = extractAccounting(allTimeFinancials[0]);
+    const thisMonth = extractAccounting(thisMonthFinancials[0]);
+    const lastMonth = extractAccounting(lastMonthFinancials[0]);
+
+    const revenueGrowth = lastMonth.netCollectedAmount > 0
+        ? (((thisMonth.netCollectedAmount - lastMonth.netCollectedAmount) / lastMonth.netCollectedAmount) * 100).toFixed(1)
+        : thisMonth.netCollectedAmount > 0 ? "100" : "0";
 
     const orderGrowth = lastMonthOrders > 0
         ? (((thisMonthOrders - lastMonthOrders) / lastMonthOrders) * 100).toFixed(1)
@@ -75,10 +205,11 @@ const getDashboardStats = asyncHandler(async (req, res) => {
         success: true,
         stats: {
             revenue: {
-                total: totalRev,
-                thisMonth: thisMonthRev,
+                total: allTime.netCollectedAmount,
+                thisMonth: thisMonth.netCollectedAmount,
                 growth: parseFloat(revenueGrowth),
             },
+            financials: allTime,
             orders: {
                 total: totalOrders,
                 active: activeOrders,
@@ -100,7 +231,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
 
 /**
  * GET /api/admin/revenue-chart — Monthly revenue data for charts
- * Returns: array of { name: "Jan", total: 12000 } for last 12 months
+ * Based on collected net revenue
  */
 const getRevenueChart = asyncHandler(async (req, res) => {
     const now = new Date();
@@ -111,6 +242,11 @@ const getRevenueChart = asyncHandler(async (req, res) => {
             $match: {
                 createdAt: { $gte: twelveMonthsAgo },
                 status: { $ne: "cancelled" },
+                $or: [
+                    { "payment.method": { $ne: "cod" }, "payment.status": { $in: ["paid", "refunded"] } },
+                    { "payment.method": "cod", "codAccounting.collectedAtDelivery": true },
+                    { "payment.method": "cod", "payment.status": "paid" },
+                ],
             },
         },
         {
@@ -119,14 +255,20 @@ const getRevenueChart = asyncHandler(async (req, res) => {
                     year: { $year: "$createdAt" },
                     month: { $month: "$createdAt" },
                 },
-                total: { $sum: "$pricing.total" },
+                total: {
+                    $sum: {
+                        $subtract: [
+                            { $ifNull: ["$payment.amountPaid", "$pricing.total"] },
+                            { $ifNull: ["$payment.refundedAmount", 0] },
+                        ],
+                    },
+                },
                 count: { $sum: 1 },
             },
         },
         { $sort: { "_id.year": 1, "_id.month": 1 } },
     ]);
 
-    // Fill in all 12 months (even empty ones)
     const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     const chartData = [];
 
@@ -141,7 +283,7 @@ const getRevenueChart = asyncHandler(async (req, res) => {
 
         chartData.push({
             name: months[d.getMonth()],
-            total: found ? found.total : 0,
+            total: found ? Math.max(0, Math.round(found.total * 100) / 100) : 0,
             orders: found ? found.count : 0,
         });
     }
@@ -163,6 +305,11 @@ const getSalesChart = asyncHandler(async (req, res) => {
             $match: {
                 createdAt: { $gte: sevenDaysAgo },
                 status: { $ne: "cancelled" },
+                $or: [
+                    { "payment.method": { $ne: "cod" }, "payment.status": { $in: ["paid", "refunded"] } },
+                    { "payment.method": "cod", "codAccounting.collectedAtDelivery": true },
+                    { "payment.method": "cod", "payment.status": "paid" },
+                ],
             },
         },
         {
@@ -173,7 +320,14 @@ const getSalesChart = asyncHandler(async (req, res) => {
                     day: { $dayOfMonth: "$createdAt" },
                 },
                 sales: { $sum: 1 },
-                revenue: { $sum: "$pricing.total" },
+                revenue: {
+                    $sum: {
+                        $subtract: [
+                            { $ifNull: ["$payment.amountPaid", "$pricing.total"] },
+                            { $ifNull: ["$payment.refundedAmount", 0] },
+                        ],
+                    },
+                },
             },
         },
         { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } },
@@ -196,7 +350,7 @@ const getSalesChart = asyncHandler(async (req, res) => {
         chartData.push({
             name: days[d.getDay()],
             sales: found ? found.sales : 0,
-            revenue: found ? found.revenue : 0,
+            revenue: found ? Math.max(0, Math.round(found.revenue * 100) / 100) : 0,
         });
     }
 
@@ -208,20 +362,17 @@ const getSalesChart = asyncHandler(async (req, res) => {
 // ============================================================
 
 /**
- * GET /api/admin/customers — List all customers with order stats
+ * GET /api/admin/customers — List all customers with collected order stats
  * Query: ?page=1&limit=20&search=query
  */
 const getCustomers = asyncHandler(async (req, res) => {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
-    // Coerce to a single string (a repeated ?search= would arrive as an array)
-    // and escape it: the value is used inside $regex, so raw input would allow
-    // regex injection / ReDoS against the users collection.
+
     const rawSearch = typeof req.query.search === "string" ? req.query.search.trim() : "";
     const search = escapeRegex(rawSearch);
 
-    // Build search filter
     const filter = {};
     if (search) {
         filter.$or = [
@@ -231,31 +382,49 @@ const getCustomers = asyncHandler(async (req, res) => {
         ];
     }
 
-    const [users, total] = await Promise.all([
+    // 1. Fetch paginated users and total matching users
+    const [users, totalMatchingUsers] = await Promise.all([
         User.find(filter)
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit)
-            .select("name email phone createdAt"),
+            .select("name email phone createdAt")
+            .lean(),
         User.countDocuments(filter),
     ]);
 
-    // Enrich with order stats using aggregation
     const userIds = users.map((u) => u._id);
 
+    // 2. Fetch order stats for these users based on collected spend
     const orderStats = await Order.aggregate([
-        { $match: { user: { $in: userIds }, status: { $ne: "cancelled" } } },
+        {
+            $match: {
+                user: { $in: userIds },
+                status: { $ne: "cancelled" },
+                $or: [
+                    { "payment.method": { $ne: "cod" }, "payment.status": { $in: ["paid", "refunded"] } },
+                    { "payment.method": "cod", "codAccounting.collectedAtDelivery": true },
+                    { "payment.method": "cod", "payment.status": "paid" },
+                ],
+            },
+        },
         {
             $group: {
                 _id: "$user",
                 totalOrders: { $sum: 1 },
-                totalSpent: { $sum: "$pricing.total" },
+                totalSpent: {
+                    $sum: {
+                        $subtract: [
+                            { $ifNull: ["$payment.amountPaid", "$pricing.total"] },
+                            { $ifNull: ["$payment.refundedAmount", 0] },
+                        ],
+                    },
+                },
                 lastOrderDate: { $max: "$createdAt" },
             },
         },
     ]);
 
-    // Build a map for fast lookup
     const statsMap = {};
     orderStats.forEach((s) => {
         statsMap[s._id.toString()] = s;
@@ -263,10 +432,9 @@ const getCustomers = asyncHandler(async (req, res) => {
 
     const customers = users.map((user) => {
         const stats = statsMap[user._id.toString()] || {};
-        const totalSpent = stats.totalSpent || 0;
+        const totalSpent = Math.max(0, stats.totalSpent || 0);
         const totalOrders = stats.totalOrders || 0;
 
-        // Determine status based on order history
         let status = "inactive";
         if (totalOrders > 0) status = "active";
         if (totalSpent >= 10000) status = "vip";
@@ -278,38 +446,69 @@ const getCustomers = asyncHandler(async (req, res) => {
             phone: user.phone || "",
             createdAt: user.createdAt,
             totalOrders,
-            totalSpent,
+            totalSpent: Math.round(totalSpent * 100) / 100,
             lastOrderDate: stats.lastOrderDate || null,
             status,
         };
     });
 
-    // Customer summary stats
-    const [totalCustomers, totalCustomerRevenue] = await Promise.all([
+    // 3. Compute global customer summary across the full database (not just the current page)
+    const [totalCustomersGlobal, globalOrderStats] = await Promise.all([
         User.countDocuments(),
         Order.aggregate([
-            { $match: { status: { $ne: "cancelled" } } },
-            { $group: { _id: null, total: { $sum: "$pricing.total" } } },
+            {
+                $match: {
+                    user: { $ne: null },
+                    status: { $ne: "cancelled" },
+                    $or: [
+                        { "payment.method": { $ne: "cod" }, "payment.status": { $in: ["paid", "refunded"] } },
+                        { "payment.method": "cod", "codAccounting.collectedAtDelivery": true },
+                        { "payment.method": "cod", "payment.status": "paid" },
+                    ],
+                },
+            },
+            {
+                $group: {
+                    _id: "$user",
+                    totalSpent: {
+                        $sum: {
+                            $subtract: [
+                                { $ifNull: ["$payment.amountPaid", "$pricing.total"] },
+                                { $ifNull: ["$payment.refundedAmount", 0] },
+                            ],
+                        },
+                    },
+                    orderCount: { $sum: 1 },
+                },
+            },
         ]),
     ]);
 
-    const activeCount = customers.filter((c) => c.status !== "inactive").length;
-    const vipCount = customers.filter((c) => c.status === "vip").length;
+    let activeCount = 0;
+    let vipCount = 0;
+    let totalCollectedRevenue = 0;
+
+    for (const stat of globalOrderStats) {
+        if (stat.orderCount > 0) activeCount++;
+        const spent = Math.max(0, stat.totalSpent || 0);
+        if (spent >= 10000) vipCount++;
+        totalCollectedRevenue += spent;
+    }
 
     res.status(200).json({
         success: true,
         customers,
         summary: {
-            total: totalCustomers,
+            total: totalCustomersGlobal,
             active: activeCount,
             vip: vipCount,
-            totalRevenue: totalCustomerRevenue[0]?.total || 0,
+            totalRevenue: Math.round(totalCollectedRevenue * 100) / 100,
         },
         pagination: {
             page,
             limit,
-            totalCount: total,
-            totalPages: Math.ceil(total / limit),
+            totalCount: totalMatchingUsers,
+            totalPages: Math.max(1, Math.ceil(totalMatchingUsers / limit)),
         },
     });
 });

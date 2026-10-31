@@ -13,6 +13,8 @@
  *  - Required overrides are authorized, explicit, and audited.
  */
 
+
+
 import mongoose from "mongoose";
 import Order from "../models/orderModal.js";
 import AppError from "../utils/AppError.js";
@@ -152,6 +154,7 @@ export async function executeOrderTransition(
         adminUser = null,
         isOverride = false,
         overrideReason = "",
+        metadata = null,
         session: passedSession = null,
     } = {}
 ) {
@@ -239,6 +242,38 @@ export async function executeOrderTransition(
         const setDoc = { status: toStatus };
         if (isDispatched && order.reservation?.state === "held") {
             setDoc["reservation.state"] = "return_pending";
+        }
+        if (toStatus === "delivered" && order.payment?.method === "cod") {
+            setDoc["codAccounting.collectedAtDelivery"] = true;
+            setDoc["codAccounting.collectedAmountPaise"] = toPaise(order.pricing?.total || 0);
+            setDoc["codAccounting.collectedAt"] = new Date();
+            if (order.codAccounting?.remittanceStatus === "none" || !order.codAccounting?.remittanceStatus) {
+                setDoc["codAccounting.remittanceStatus"] = "pending";
+            }
+        }
+        if (metadata) {
+            if (metadata.trackingId) {
+                setDoc["shipping.trackingNumber"] = metadata.trackingId;
+            }
+            if (metadata.courierName) {
+                setDoc["shipping.courierName"] = metadata.courierName;
+            }
+        }
+        if (toStatus === "delivered" && order.payment?.method === "cod") {
+            setDoc["codAccounting.collectedAtDelivery"] = true;
+            setDoc["codAccounting.collectedAmountPaise"] = toPaise(order.pricing?.total || 0);
+            setDoc["codAccounting.collectedAt"] = new Date();
+            if (order.codAccounting?.remittanceStatus === "none" || !order.codAccounting?.remittanceStatus) {
+                setDoc["codAccounting.remittanceStatus"] = "pending";
+            }
+        }
+        if (metadata) {
+            if (metadata.trackingId) {
+                setDoc["shiprocket.awbCode"] = metadata.trackingId;
+            }
+            if (metadata.courierName) {
+                setDoc["shiprocket.courierName"] = metadata.courierName;
+            }
         }
 
         const updated = await Order.findOneAndUpdate(

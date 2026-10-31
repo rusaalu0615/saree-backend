@@ -16,16 +16,31 @@ const productSchema = new mongoose.Schema({
     },
     regularPrice: {
         type: Number,
-        required: true,
+        required: [true, "Regular price is required"],
+        min: [0, "Regular price cannot be negative"],
+        validate: {
+            validator: (v) => Number.isFinite(v) && v >= 0,
+            message: "Regular price must be a finite, non-negative number",
+        },
     },
     price: {
         type: Number,
-        required: true,
+        required: [true, "Price is required"],
+        min: [0, "Price cannot be negative"],
+        validate: {
+            validator: (v) => Number.isFinite(v) && v >= 0,
+            message: "Price must be a finite, non-negative number",
+        },
     },
     stock: {
         type: Number,
-        required: true,
+        required: [true, "Stock is required"],
         default: 0,
+        min: [0, "Stock cannot be negative"],
+        validate: {
+            validator: (v) => Number.isInteger(v) && v >= 0,
+            message: "Stock must be a non-negative whole integer",
+        },
     },
     shortDescription: {
         type: String,
@@ -107,6 +122,17 @@ const productSchema = new mongoose.Schema({
     productCollection: {
         type: String,
         default: "",
+    },
+    averageRating: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 5,
+    },
+    numReviews: {
+        type: Number,
+        default: 0,
+        min: 0,
     },
 }, { timestamps: true });
 

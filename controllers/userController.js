@@ -26,20 +26,34 @@ const hashOtp = (otp) => crypto.createHash("sha256").update(otp).digest("hex");
 // success so resetPassword can re-check it and then delete every OTP for the
 // email. Guards against brute-forcing the code (the IP limiter alone allowed
 // ~15 guesses) and against plaintext OTP leaking on a DB read breach.
+const OTP_RESET_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
 const checkResetOtp = async (sanitizedEmail, otp) => {
-    const record = await OTP.findOne({ email: sanitizedEmail }).sort({ createdAt: -1 });
-    if (!record) return { ok: false, reason: "expired" };
+    const now = new Date();
+    // Atomically increment attempts on an unexpired, purpose-bound record
+    const record = await OTP.findOneAndUpdate(
+        {
+            email: sanitizedEmail,
+            purpose: "password_reset",
+            expiresAt: { $gt: now },
+            attempts: { $lt: MAX_OTP_ATTEMPTS },
+        },
+        { $inc: { attempts: 1 } },
+        { returnDocument: "after" }
+    );
 
-    record.attempts += 1;
-    await record.save();
-
-    if (record.attempts > MAX_OTP_ATTEMPTS) {
-        await OTP.deleteMany({ email: sanitizedEmail });
-        return { ok: false, reason: "locked" };
+    if (!record) {
+        // Record missing, expired, or attempts exceeded
+        await OTP.deleteMany({ email: sanitizedEmail, purpose: "password_reset" });
+        return { ok: false, reason: "expired_or_locked" };
     }
 
     if (!safeHexCompare(record.otp, hashOtp(otp))) {
-        return { ok: false, reason: "invalid" };
+        if (record.attempts >= MAX_OTP_ATTEMPTS) {
+            await OTP.deleteMany({ email: sanitizedEmail, purpose: "password_reset" });
+            return { ok: false, reason: "locked" };
+        }
+        return { ok: false, reason: "invalid", remaining: MAX_OTP_ATTEMPTS - record.attempts };
     }
     return { ok: true, record };
 };
@@ -177,10 +191,13 @@ const forgotPassword = asyncHandler(async (req, res) => {
         // Delete any existing OTP for this email
         await OTP.deleteMany({ email: sanitizedEmail });
 
-        // Save new OTP (hashed at rest, matching the admin OTP flow)
+        // Save new purpose-bound OTP with explicit expiration date
         await OTP.create({
             email: sanitizedEmail,
-            otp: hashOtp(otpCode)
+            otp: hashOtp(otpCode),
+            purpose: "password_reset",
+            attempts: 0,
+            expiresAt: new Date(Date.now() + OTP_RESET_WINDOW_MS),
         });
 
         // Send email
@@ -208,15 +225,21 @@ const verifyOtp = asyncHandler(async (req, res) => {
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    const { ok, reason } = await checkResetOtp(sanitizedEmail, otp);
+    const { ok, reason, record, remaining } = await checkResetOtp(sanitizedEmail, otp);
 
     if (!ok) {
         return res.status(400).json({
             message: reason === "locked"
                 ? "Too many incorrect attempts. Please request a new code."
-                : "Invalid or expired OTP",
+                : (remaining !== undefined ? `Invalid verification code. ${remaining} attempts remaining.` : "Invalid or expired OTP"),
         });
     }
+
+    // Mark verified on record so resetPassword can complete without re-verifying attempt count
+    await OTP.updateOne(
+        { _id: record._id },
+        { $set: { verified: true, verifiedAt: new Date() } }
+    );
 
     res.status(200).json({ message: "OTP verified successfully" });
 });
@@ -238,16 +261,22 @@ const resetPassword = asyncHandler(async (req, res) => {
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    // Verify OTP one last time (hashed comparison + attempt cap) so the previous
-    // step can't be bypassed.
-    const { ok, reason } = await checkResetOtp(sanitizedEmail, otp);
+    const now = new Date();
+    const hashed = hashOtp(otp);
 
-    if (!ok) {
-        return res.status(400).json({
-            message: reason === "locked"
-                ? "Too many incorrect attempts. Please request a new code."
-                : "Invalid or expired OTP",
-        });
+    // Atomically find and consume the verified unexpired OTP single-use
+    const consumed = await OTP.findOneAndDelete({
+        email: sanitizedEmail,
+        purpose: "password_reset",
+        expiresAt: { $gt: now },
+        $or: [
+            { otp: hashed },
+            { verified: true }
+        ],
+    });
+
+    if (!consumed) {
+        return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
     // password field is select:false now, so request it explicitly
@@ -262,8 +291,8 @@ const resetPassword = asyncHandler(async (req, res) => {
     user.passwordChangedAt = new Date();
     await user.save();
 
-    // Delete all OTPs for this email so the code can't be reused.
-    await OTP.deleteMany({ email: sanitizedEmail });
+    // Delete any remaining OTPs for this email and purpose so codes cannot be replayed.
+    await OTP.deleteMany({ email: sanitizedEmail, purpose: "password_reset" });
 
     res.status(200).json({ message: "Password reset successfully" });
 });

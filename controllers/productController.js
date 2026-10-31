@@ -32,13 +32,37 @@ const addProduct = async (req, res) => {
 
         // ── Validate BEFORE uploading to R2 ──
         if (
-            !name || !sku || !category || !price || !regularPrice || !stock ||
+            !name || !sku || !category || price === undefined || regularPrice === undefined || stock === undefined ||
             !shortDescription || !tags || !color || !material || !sareeSize ||
             !blouseSize || !washCare || !files?.mainImage?.[0]
         ) {
             return res.status(400).json({
                 success: false,
                 message: "All fields except Video and permanent notes are required.",
+            });
+        }
+
+        const numPrice = Number(price);
+        if (!Number.isFinite(numPrice) || numPrice < 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Price must be a finite, non-negative number",
+            });
+        }
+
+        const numRegularPrice = Number(regularPrice);
+        if (!Number.isFinite(numRegularPrice) || numRegularPrice < 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Regular price must be a finite, non-negative number",
+            });
+        }
+
+        const numStock = Number(stock);
+        if (!Number.isInteger(numStock) || numStock < 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Stock must be a non-negative whole integer",
             });
         }
 
@@ -118,73 +142,76 @@ const getAllProducts = async (req, res) => {
         } = req.query;
 
         const searchQuery = search || q;
-        const filter = {};
+        const andConditions = [];
         
         // 1. Text Search
         if (searchQuery) {
-            filter.$text = { $search: searchQuery };
+            andConditions.push({ $text: { $search: searchQuery } });
         }
 
-        // 2. Exact Match Filters
+        // 2. Exact Match Filters (OR within the same attribute group, AND across independent groups)
         if (category) {
             const regexList = category
                 .split(',')
                 .slice(0, MAX_FILTER_TOKENS)
                 .map(c => new RegExp(`^${dashPattern(c)}$`, "i"));
-            filter.category = { $in: regexList };
+            andConditions.push({ category: { $in: regexList } });
         }
         if (color) {
             const colorList = color
                 .split(',')
                 .slice(0, MAX_FILTER_TOKENS)
                 .map(c => new RegExp(`^${dashPattern(c)}$`, "i"));
-            filter.color = { $in: colorList };
+            andConditions.push({ color: { $in: colorList } });
         }
         if (material) {
             const materialList = material
                 .split(',')
                 .slice(0, MAX_FILTER_TOKENS)
                 .map(c => new RegExp(`^${dashPattern(c)}$`, "i"));
-            filter.material = { $in: materialList };
+            andConditions.push({ material: { $in: materialList } });
         }
 
         const targetCollection = productCollection || collection;
         if (targetCollection) {
             if (targetCollection === "festive") {
-                filter.$or = [{ isFestive: true }, { productCollection: "festive" }];
+                andConditions.push({ $or: [{ isFestive: true }, { productCollection: "festive" }] });
             } else if (targetCollection === "big-sale" || targetCollection === "sale") {
-                filter.$or = [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }];
+                andConditions.push({ $or: [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }] });
             } else {
-                filter.productCollection = targetCollection;
+                andConditions.push({ productCollection: targetCollection });
             }
         }
 
         if (isOnSale !== undefined) {
-            if (isOnSale === "true") {
-                filter.$or = filter.$or || [];
-                filter.$or.push({ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" });
+            if (isOnSale === "true" || isOnSale === true) {
+                andConditions.push({ $or: [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }] });
             } else {
-                filter.isOnSale = false;
+                andConditions.push({ isOnSale: false });
             }
         }
 
         if (isFestive !== undefined) {
-            if (isFestive === "true") {
-                filter.$or = filter.$or || [];
-                filter.$or.push({ isFestive: true }, { productCollection: "festive" });
+            if (isFestive === "true" || isFestive === true) {
+                andConditions.push({ $or: [{ isFestive: true }, { productCollection: "festive" }] });
             } else {
-                filter.isFestive = false;
+                andConditions.push({ isFestive: false });
             }
         }
 
-        if (isNewArrival !== undefined) filter.isNewArrival = isNewArrival === "true";
+        if (isNewArrival !== undefined) {
+            andConditions.push({ isNewArrival: isNewArrival === "true" || isNewArrival === true });
+        }
 
         // 3. Price Range Filter
         if (priceMin || priceMax) {
-            filter.price = {};
-            if (priceMin) filter.price.$gte = Number(priceMin);
-            if (priceMax) filter.price.$lte = Number(priceMax);
+            const priceFilter = {};
+            if (priceMin) priceFilter.$gte = Number(priceMin);
+            if (priceMax) priceFilter.$lte = Number(priceMax);
+            andConditions.push({ price: priceFilter });
         }
+
+        const filter = andConditions.length > 0 ? { $and: andConditions } : {};
 
         // 4. Projection (Exclude heavy fields for lists unless fullData is true)
         const projection = searchQuery ? { score: { $meta: "textScore" } } : {};
@@ -223,32 +250,37 @@ const getAllProducts = async (req, res) => {
             }
         }
 
-        // 6. Pagination
-        // Default to no pagination if limit is not provided (for backward compatibility until frontend refactor)
-        const isPaginated = limit !== undefined;
-        const pageNum = parseInt(page) || 1;
-        const limitNum = parseInt(limit) || 0;
+        // 6. Bounded Pagination: validated default 20, max 100
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        let limitNum;
+        if (limit === undefined || limit === null || limit === "") {
+            limitNum = 20; // default page size
+        } else {
+            const parsed = parseInt(limit);
+            if (isNaN(parsed) || parsed <= 0) {
+                limitNum = 20;
+            } else {
+                limitNum = Math.min(parsed, 100); // capped at maximum 100
+            }
+        }
         const skipNum = (pageNum - 1) * limitNum;
 
-        const query = productModal.find(filter, projection).sort(sort).lean();
-        if (isPaginated) {
-            query.skip(skipNum).limit(limitNum);
-        }
+        const query = productModal.find(filter, projection).sort(sort).lean().skip(skipNum).limit(limitNum);
 
         const [products, totalProducts] = await Promise.all([
             query,
-            isPaginated ? productModal.countDocuments(filter) : Promise.resolve(0)
+            productModal.countDocuments(filter)
         ]);
 
         res.status(200).json({
             success: true,
             products,
-            pagination: isPaginated ? {
+            pagination: {
                 currentPage: pageNum,
-                totalPages: Math.ceil(totalProducts / limitNum),
+                totalPages: Math.max(1, Math.ceil(totalProducts / limitNum)),
                 totalProducts,
                 limit: limitNum
-            } : null
+            }
         });
     } catch (error) {
         console.error(error);
@@ -500,11 +532,62 @@ const updateProduct = async (req, res) => {
             updateData.galleryImages = [...existingGallery, ...newGalleryImages];
         }
 
-        const product = await productModal.findByIdAndUpdate(id, updateData, { new: true });
+        // Validate price/stock if included in updateData
+        if (updateData.price !== undefined) {
+            const p = Number(updateData.price);
+            if (!Number.isFinite(p) || p < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Price must be a finite, non-negative number",
+                });
+            }
+            updateData.price = p;
+        }
+
+        if (updateData.regularPrice !== undefined && updateData.regularPrice !== null) {
+            const rp = Number(updateData.regularPrice);
+            if (!Number.isFinite(rp) || rp < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Regular price must be a finite, non-negative number",
+                });
+            }
+            updateData.regularPrice = rp;
+        }
+
+        if (updateData.stock !== undefined) {
+            const s = Number(updateData.stock);
+            if (!Number.isInteger(s) || s < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Stock must be a non-negative whole integer",
+                });
+            }
+            updateData.stock = s;
+        }
+
+        // Concurrency guard: if expectedStock is provided, assert stock hasn't changed
+        const updateFilter = { _id: id };
+        if (req.body.expectedStock !== undefined) {
+            updateFilter.stock = Number(req.body.expectedStock);
+        }
+
+        const product = await productModal.findOneAndUpdate(updateFilter, updateData, {
+            runValidators: true,
+            returnDocument: "after",
+        });
+
         if (!product) {
-            return res.status(404).json({
+            const exists = await productModal.exists({ _id: id });
+            if (!exists) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Product not found",
+                });
+            }
+            return res.status(409).json({
                 success: false,
-                message: "Product not found",
+                message: "Stock has changed concurrently (likely due to checkout reservations). Please refresh and review current stock.",
             });
         }
 
@@ -638,11 +721,61 @@ const quickUpdateProduct = async (req, res) => {
             }
         }
 
-        const product = await productModal.findByIdAndUpdate(id, updates, { new: true });
+        if (updates.price !== undefined) {
+            const p = Number(updates.price);
+            if (!Number.isFinite(p) || p < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Price must be a finite, non-negative number",
+                });
+            }
+            updates.price = p;
+        }
+
+        if (updates.regularPrice !== undefined && updates.regularPrice !== null) {
+            const rp = Number(updates.regularPrice);
+            if (!Number.isFinite(rp) || rp < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Regular price must be a finite, non-negative number",
+                });
+            }
+            updates.regularPrice = rp;
+        }
+
+        if (updates.stock !== undefined) {
+            const s = Number(updates.stock);
+            if (!Number.isInteger(s) || s < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Stock must be a non-negative whole integer",
+                });
+            }
+            updates.stock = s;
+        }
+
+        // Concurrency guard: if expectedStock is provided, assert stock hasn't changed
+        const quickFilter = { _id: id };
+        if (rawUpdates.expectedStock !== undefined) {
+            quickFilter.stock = Number(rawUpdates.expectedStock);
+        }
+
+        const product = await productModal.findOneAndUpdate(quickFilter, updates, {
+            runValidators: true,
+            returnDocument: "after",
+        });
+
         if (!product) {
-            return res.status(404).json({
+            const exists = await productModal.exists({ _id: id });
+            if (!exists) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Product not found",
+                });
+            }
+            return res.status(409).json({
                 success: false,
-                message: "Product not found",
+                message: "Stock has changed concurrently (likely due to checkout reservations). Please refresh and review current stock.",
             });
         }
 

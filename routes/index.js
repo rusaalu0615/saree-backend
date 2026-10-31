@@ -15,6 +15,7 @@ import festiveSaleRoutes from "./festiveSaleRoutes.js";
 import festiveBannerRoutes from "./festiveBannerRoutes.js";
 import celebrityBannerRoutes from "./celebrityBannerRoutes.js";
 import marketingCollectionRoutes from "./marketingCollectionRoutes.js";
+import contactRoutes from "./contactRoutes.js";
 
 const router = express.Router();
 
@@ -34,5 +35,6 @@ router.use("/festive-sale", festiveSaleRoutes);
 router.use("/festive-banner", festiveBannerRoutes);
 router.use("/celebrity-collection", celebrityBannerRoutes);
 router.use("/marketing-collections", marketingCollectionRoutes);
+router.use("/contact", contactRoutes);
 
-export default router;
+export default router;

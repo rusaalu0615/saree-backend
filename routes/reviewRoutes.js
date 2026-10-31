@@ -6,12 +6,13 @@ import validate from "../middlewares/validate.js";
 import { createReviewSchema } from "../validations/schemas.js";
 
 const router = express.Router();
-const { createReview, getProductReviews, deleteReview } = reviewController;
+const { createReview, getProductReviews, deleteReview, recalculateProductStats } = reviewController;
 
 // Public routes
 router.get("/product/:id", getProductReviews);
 
 // Protected routes (requires login)
+router.post("/product/:id/recalculate", protect, recalculateProductStats);
 router.post("/product/:id", protect, upLoadImage.array("photos", 5), validate(createReviewSchema), createReview);
 router.delete("/:id", protect, deleteReview);
 
