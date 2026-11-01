@@ -177,36 +177,51 @@ const loginUser = asyncHandler(async (req, res) => {
 const forgotPassword = asyncHandler(async (req, res) => {
     const { email } = req.body;
 
-    if (!email) {
+    if (!email || typeof email !== "string") {
         return res.status(400).json({ message: "Email is required" });
     }
 
     const sanitizedEmail = email.trim().toLowerCase();
-    const user = await User.findOne({ email: sanitizedEmail });
+    const user = await User.findOne({
+        email: { $regex: new RegExp(`^${sanitizedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    });
 
-    // Never reveal whether the email exists (enumeration oracle). Respond the
-    // same way either way; only send the OTP when there is a real account.
-    if (user) {
-        // Generate 6-digit OTP (cryptographically secure)
-        const otpCode = crypto.randomInt(100000, 1000000).toString();
-
-        // Delete any existing OTP for this email
-        await OTP.deleteMany({ email: sanitizedEmail });
-
-        // Save new purpose-bound OTP with explicit expiration date
-        await OTP.create({
-            email: sanitizedEmail,
-            otp: hashOtp(otpCode),
-            purpose: "password_reset",
-            attempts: 0,
-            expiresAt: new Date(Date.now() + OTP_RESET_WINDOW_MS),
+    if (!user) {
+        return res.status(404).json({
+            message: "No account found with this email address. Please check your spelling or sign up.",
         });
-
-        // Send email
-        await emailService.sendPasswordResetOTPEmail(sanitizedEmail, otpCode);
     }
 
-    res.status(200).json({ message: "If an account exists for this email, a reset code has been sent" });
+    // Generate 6-digit OTP (cryptographically secure)
+    const otpCode = crypto.randomInt(100000, 1000000).toString();
+
+    // Delete any existing OTP for this email
+    await OTP.deleteMany({ email: user.email, purpose: "password_reset" });
+
+    // Save new purpose-bound OTP with explicit expiration date
+    await OTP.create({
+        email: user.email,
+        otp: hashOtp(otpCode),
+        purpose: "password_reset",
+        attempts: 0,
+        expiresAt: new Date(Date.now() + OTP_RESET_WINDOW_MS),
+    });
+
+    // Send email with defensive error handling
+    try {
+        await emailService.sendPasswordResetOTPEmail(user.email, otpCode);
+    } catch (emailErr) {
+        console.error("[ForgotPassword] Failed to send reset OTP email:", emailErr);
+        await OTP.deleteMany({ email: user.email, purpose: "password_reset" });
+        return res.status(500).json({
+            message: "Failed to send reset code email. Please try again in a few moments.",
+        });
+    }
+
+    res.status(200).json({
+        success: true,
+        message: "A 6-digit reset code has been sent to your email.",
+    });
 });
 
 const verifyOtp = asyncHandler(async (req, res) => {

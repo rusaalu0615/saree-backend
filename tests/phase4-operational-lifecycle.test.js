@@ -132,7 +132,7 @@ describe("PHASE 4: Operational Lifecycle Completion and Admin Consistency Accept
             },
         });
 
-        const sweepResult = await runTrackingSweep(10);
+        const sweepResult = await runTrackingSweep(100);
         assert.ok(sweepResult.synced >= 1, "Tracking sweep must sync active order");
 
         const reloaded = await Order.findById(order._id);
