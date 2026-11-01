@@ -63,7 +63,7 @@ const adminProtect = async (req, res, next) => {
         // 4b. Reject tokens issued before the admin's password was last changed,
         // so a password reset invalidates every previously active admin session.
         if (user.passwordChangedAt &&
-            Math.floor(user.passwordChangedAt.getTime() / 1000) > decoded.iat) {
+            (Math.floor(user.passwordChangedAt.getTime() / 1000) - 2) > decoded.iat) {
             return res.status(401).json({ message: "Session expired. Please log in again." });
         }
 

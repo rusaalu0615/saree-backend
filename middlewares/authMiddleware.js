@@ -46,7 +46,7 @@ const protect = async (req, res, next) => {
         // 5. Reject tokens issued before the password was last changed, so a
         //    reset/password change invalidates every previously active session.
         if (user.passwordChangedAt &&
-            Math.floor(user.passwordChangedAt.getTime() / 1000) > decoded.iat) {
+            (Math.floor(user.passwordChangedAt.getTime() / 1000) - 2) > decoded.iat) {
             return res.status(401).json({ message: "Session expired. Please log in again." });
         }
 
@@ -84,7 +84,7 @@ const optionalProtect = async (req, res, next) => {
         const revoked = decoded.jti && Array.isArray(user?.revokedTokens) &&
             user.revokedTokens.some(t => t.jti === decoded.jti);
         const stale = user && user.passwordChangedAt &&
-            Math.floor(user.passwordChangedAt.getTime() / 1000) > decoded.iat;
+            (Math.floor(user.passwordChangedAt.getTime() / 1000) - 2) > decoded.iat;
 
         if (user && !revoked && !stale) {
             req.user = user;

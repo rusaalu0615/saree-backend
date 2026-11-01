@@ -118,6 +118,7 @@ const registerUser = asyncHandler(async (req, res) => {
         name: user.name,
         email: user.email,
         phone: user.phone,
+        token,
     })
 });
 
@@ -160,9 +161,6 @@ const loginUser = asyncHandler(async (req, res) => {
     });
 
     res.status(200).json({
-        // Return a trimmed object — `user` was fetched with .select("+password"),
-        // so spreading it directly would leak the password hash. The auth token
-        // rides the HttpOnly cookie only; never echo it in the body.
         user: {
             _id: user._id,
             name: user.name,
@@ -170,6 +168,7 @@ const loginUser = asyncHandler(async (req, res) => {
             phone: user.phone,
             role: user.role,
         },
+        token,
         message: "Login successful",
     })
 });
