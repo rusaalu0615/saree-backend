@@ -121,7 +121,7 @@ export async function confirmPaymentCaptured(orderId, { paymentId, amountPaise, 
         const claimed = await Order.findOneAndUpdate(
             { _id: orderId, "payment.status": { $in: ["pending", "failed"] } },
             { $set: set, $push: { timeline: { status: "Payment Successful", description: `Payment confirmed (${source})`, date: new Date() } } },
-            { new: true, session }
+            { returnDocument: 'after', session }
         );
         if (!claimed) return null; // another path won, or terminal (paid/refunded)
 
@@ -269,7 +269,7 @@ export async function releaseReservation(orderId, { reason = "order-failed" } = 
                     ],
                 },
                 { $set: { "reservation.state": "release_requested", "reservation.releaseReason": reason, "reservation.retryable": false, resourcesReleased: false } },
-                { new: true, session }
+                { returnDocument: 'after', session }
             );
             if (!claimed) return { kind: "no_claim" };
 
@@ -403,7 +403,7 @@ export async function confirmPhysicalReturn(orderId, { description = "Physical r
                 },
                 $push: { timeline: { status: "Returned — Stock Restored", description, date: new Date() } },
             },
-            { new: true, session }
+            { returnDocument: 'after', session }
         );
         if (!claimed) return { success: true, alreadyRestored: true };
 
@@ -444,7 +444,7 @@ export async function requestCancellation(orderId, { reason = "Order cancelled" 
     const claimed = await Order.findOneAndUpdate(
         { _id: orderId, "cancellation.status": { $in: ["none", null] } },
         { $set: { "cancellation.status": "requested", "cancellation.requestedAt": new Date(), "cancellation.reason": reason }, $push: { timeline: { status: "Cancellation Requested", description: reason, date: new Date() } } },
-        { new: true }
+        { returnDocument: 'after' }
     );
     return claimed; // null → already requested/completed (idempotent)
 }
@@ -460,7 +460,7 @@ export async function recordCourierOutcome(orderId, outcome /* confirmed|uncerta
 export async function completeCancellation(orderId) {
     const res = await Order.findOneAndUpdate(
         { _id: orderId, "cancellation.status": "requested" },
-        { $set: { "cancellation.status": "completed", "cancellation.resolvedAt": new Date(), status: "cancelled" }, new: true }
+        { $set: { "cancellation.status": "completed", "cancellation.resolvedAt": new Date(), status: "cancelled" }, returnDocument: 'after' }
     );
     return res;
 }
@@ -501,7 +501,7 @@ export async function claimRefundIntent(orderId, { leaseOwner = WORKER_ID, lease
                 "refund.attempts": (order.refund?.attempts || 0) + 1,
             },
         },
-        { new: true }
+        { returnDocument: 'after' }
     );
     if (!claimed) return null;
     return { order: claimed, refundablePaise: refundable };

@@ -103,7 +103,7 @@ const updateCoupon = asyncHandler(async (req, res) => {
     // Whitelist to declared schema fields so the update doc can't carry
     // NoSQL-operator keys ($set/$where) or unknown/internal fields.
     const coupon = await Coupon.findByIdAndUpdate(req.params.id, pickSchemaFields(Coupon, req.body), {
-        new: true,
+        returnDocument: 'after',
         runValidators: true,
     });
 

@@ -316,7 +316,7 @@ async function replayWebhookEvents() {
                 $set: { state: "in_flight", leaseExpiresAt: new Date(Date.now() + CLAIM_LEASE_MS) },
                 $inc: { retries: 1 },
             },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!doc) break;
         claimedDocs.push(doc);
@@ -419,7 +419,20 @@ async function reconcileRefunds() {
                     ).catch(() => {});
                 }
             }
-        } catch (err) {
+                } catch (err) {
+            const is404NotFound = err?.statusCode === 404 || err?.status === 404;
+            const isTestOrder = typeof doc.orderId === "string" && doc.orderId.startsWith("TEST-");
+
+            if (is404NotFound && isTestOrder) {
+                // Mock test order from automated tests not present on live gateway — mark resolved
+                await Order.updateOne(
+                    { _id: doc._id },
+                    { $set: { "refund.finalized": true, "refund.status": "failed", "refund.lastError": "Test order not found on gateway" } }
+                ).catch(() => {});
+                console.log(`[Sweeper] Resolved obsolete test refund record for ${doc.orderId}`);
+                continue;
+            }
+
             // Provider error is NOT proof of absence — schedule another look.
             await Order.updateOne(
                 { _id: doc._id },

@@ -97,7 +97,7 @@ const updateCategory = async (req, res) => {
             }
         }
 
-        const category = await categoriesModal.findByIdAndUpdate(id, updateData, { new: true });
+        const category = await categoriesModal.findByIdAndUpdate(id, updateData, { returnDocument: 'after' });
         if (!category) {
             return res.status(404).json({
                 success: false,

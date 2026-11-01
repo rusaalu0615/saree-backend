@@ -269,12 +269,12 @@ describe("PHASE 6: 27 Required Full End-to-End Journeys Verification Suite", () 
         const buy1 = await Product.findOneAndUpdate(
             { _id: product._id, stock: { $gte: 1 } },
             { $inc: { stock: -1 } },
-            { new: true }
+            { returnDocument: 'after' }
         );
         const buy2 = await Product.findOneAndUpdate(
             { _id: product._id, stock: { $gte: 1 } },
             { $inc: { stock: -1 } },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         assert.ok(buy1, "First buyer should successfully reserve stock");
@@ -295,7 +295,7 @@ describe("PHASE 6: 27 Required Full End-to-End Journeys Verification Suite", () 
         const updated = await User.findOneAndUpdate(
             { _id: user._id, "cart.productId": product._id },
             { $set: { "cart.$.quantity": 4 } },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         assert.equal(updated.cart[0].quantity, 4);
@@ -318,7 +318,7 @@ describe("PHASE 6: 27 Required Full End-to-End Journeys Verification Suite", () 
         const claimed = await Coupon.findOneAndUpdate(
             { _id: coupon._id, $expr: { $lt: ["$usedCount", "$usageLimit"] } },
             { $inc: { usedCount: 1 } },
-            { new: true }
+            { returnDocument: 'after' }
         );
         assert.equal(claimed.usedCount, 1);
 
@@ -326,7 +326,7 @@ describe("PHASE 6: 27 Required Full End-to-End Journeys Verification Suite", () 
         const claimedSecond = await Coupon.findOneAndUpdate(
             { _id: coupon._id, $expr: { $lt: ["$usedCount", "$usageLimit"] } },
             { $inc: { usedCount: 1 } },
-            { new: true }
+            { returnDocument: 'after' }
         );
         assert.equal(claimedSecond, null);
 
@@ -334,7 +334,7 @@ describe("PHASE 6: 27 Required Full End-to-End Journeys Verification Suite", () 
         const rolledBack = await Coupon.findByIdAndUpdate(
             coupon._id,
             { $inc: { usedCount: -1 } },
-            { new: true }
+            { returnDocument: 'after' }
         );
         assert.equal(rolledBack.usedCount, 0);
     });
@@ -459,7 +459,7 @@ describe("PHASE 6: 27 Required Full End-to-End Journeys Verification Suite", () 
             scans: [{ activity: "Delivered", date: new Date().toISOString(), location: "Delhi" }],
         });
 
-        await runTrackingSweep();
+        await runTrackingSweep(100);
 
         const reloaded = await Order.findById(order._id);
         assert.equal(reloaded.status, "delivered");
@@ -565,7 +565,7 @@ describe("PHASE 6: 27 Required Full End-to-End Journeys Verification Suite", () 
         const updated = await Order.findOneAndUpdate(
             { _id: order._id, "refund.finalized": { $ne: true } },
             { $inc: { "payment.refundedAmount": 1999 } },
-            { new: true }
+            { returnDocument: 'after' }
         );
         assert.equal(updated, null, "Duplicate finalize event must be ignored");
     });

@@ -72,7 +72,7 @@ export const upsertCategoryBanner = async (req, res) => {
                 buttonText, 
                 link: link || `/collections/${slug}` 
             },
-            { new: true, upsert: true }
+            { returnDocument: 'after', upsert: true }
         );
 
         res.status(200).json({

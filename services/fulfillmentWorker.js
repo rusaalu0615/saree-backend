@@ -117,7 +117,7 @@ export async function claimFulfillment(orderId, claimToken = makeClaimToken(), l
             },
             $inc: { "fulfillment.attempts": 1 },
         },
-        { new: true }
+        { returnDocument: 'after' }
     );
 }
 

@@ -40,7 +40,7 @@ export const upsertCelebrityBanner = async (req, res) => {
         }
 
         const banner = await CelebrityBanner.findOneAndUpdate({}, updateData, {
-            new: true,
+            returnDocument: 'after',
             upsert: true,
             setDefaultsOnInsert: true,
             runValidators: true
@@ -67,7 +67,7 @@ export const upsertCelebrityBanner = async (req, res) => {
         await MarketingCollection.findOneAndUpdate(
             { key: "celebrity" },
             marketingData,
-            { returnDocument: 'after', new: true, upsert: true }
+            { returnDocument: 'after', upsert: true }
         ).catch(err => console.warn("Sync celebrity marketing collection error:", err));
 
         res.status(200).json({

@@ -710,7 +710,7 @@ const uploadProductVideo = async (req, res) => {
 
         const videoUrl = await uploadVideo(file.buffer);
 
-        const product = await productModal.findByIdAndUpdate(id, { videoFile: videoUrl }, { new: true });
+        const product = await productModal.findByIdAndUpdate(id, { videoFile: videoUrl }, { returnDocument: 'after' });
         if (!product) {
             return res.status(404).json({
                 success: false,

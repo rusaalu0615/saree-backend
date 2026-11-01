@@ -103,7 +103,7 @@ const updateBlog = async (req, res) => {
             updateData.image = req.body.image;
         }
 
-        const blog = await blogModal.findByIdAndUpdate(id, updateData, { new: true });
+        const blog = await blogModal.findByIdAndUpdate(id, updateData, { returnDocument: 'after' });
 
         if (!blog) {
             return res.status(404).json({

@@ -33,7 +33,7 @@ export const updateProductRatingStats = async (productId) => {
     const updatedProduct = await Product.findByIdAndUpdate(
         prodObjectId,
         { averageRating, numReviews },
-        { new: true }
+        { returnDocument: 'after' }
     );
 
     return { averageRating, numReviews, product: updatedProduct };

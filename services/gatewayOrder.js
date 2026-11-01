@@ -136,7 +136,7 @@ export async function claimGatewayOrderInit(orderId, { leaseMs = DEFAULT_LEASE_M
             },
             $inc: { "gatewayInit.attempts": 1 },
         },
-        { new: true }
+        { returnDocument: 'after' }
     );
 
     if (claimed) {
@@ -417,7 +417,7 @@ export async function ensureGatewayOrder(razorpay, order, { leaseMs = DEFAULT_LE
                         "gatewayInit.lastError": null,
                     },
                 },
-                { new: true }
+                { returnDocument: 'after' }
             );
             const fresh = linked || (await Order.findById(order._id));
             return {
@@ -573,7 +573,7 @@ export async function ensureGatewayOrder(razorpay, order, { leaseMs = DEFAULT_LE
                         },
                     },
                 },
-                { new: true }
+                { returnDocument: 'after' }
             );
 
             if (updated) {
@@ -614,7 +614,7 @@ export async function ensureGatewayOrder(razorpay, order, { leaseMs = DEFAULT_LE
                     },
                 },
             },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         const fresh = updated || (await Order.findById(order._id));
@@ -647,7 +647,7 @@ export async function ensureGatewayOrder(razorpay, order, { leaseMs = DEFAULT_LE
                     "gatewayInit.lastError": null,
                 },
             },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         if (!updated) {

@@ -64,7 +64,7 @@ export async function claimCancellation(orderId, claimToken = makeClaimToken(), 
             },
             $inc: { "cancellation.attempts": 1 },
         },
-        { new: true }
+        { returnDocument: 'after' }
     );
 }
 

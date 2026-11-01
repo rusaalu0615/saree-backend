@@ -409,7 +409,7 @@ const createOrder = asyncHandler(async (req, res) => {
             const claimed = await Coupon.findOneAndUpdate(
                 { code: cleanCode, isActive: true, usedCount: { $lt: usageLimitBefore } },
                 { $inc: { usedCount: 1 }, $push: { usedBy: orderUserId } },
-                { session, new: true }
+                { session, returnDocument: 'after' }
             );
             if (!claimed) {
                 throw new AppError("Coupon is invalid or has expired.", 400);

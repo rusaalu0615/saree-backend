@@ -49,7 +49,7 @@ export async function claimJob(workerId = WORKER_ID) {
             },
             $inc: { attempts: 1 },
         },
-        { new: true, sort: { nextAttemptAt: 1 } }
+        { returnDocument: 'after', sort: { nextAttemptAt: 1 } }
     );
 }
 

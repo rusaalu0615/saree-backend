@@ -196,7 +196,7 @@ export async function executeOrderTransition(
                         },
                     },
                 },
-                { new: true, session }
+                { returnDocument: 'after', session }
             );
 
             if (!updated) {
@@ -282,7 +282,7 @@ export async function executeOrderTransition(
                 $set: setDoc,
                 $push: { timeline: timelineEntry },
             },
-            { new: true, session }
+            { returnDocument: 'after', session }
         );
 
         if (!updated) {

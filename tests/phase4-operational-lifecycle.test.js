@@ -432,7 +432,7 @@ describe("PHASE 4: Operational Lifecycle Completion and Admin Consistency Accept
                     "fulfillment.lockUntil": new Date(Date.now() + 60000),
                 },
             },
-            { new: true }
+            { returnDocument: 'after' }
         );
         assert.equal(claimed.fulfillment.lockOwner, "fresh-worker-B");
 
