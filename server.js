@@ -1,4 +1,10 @@
-import "dotenv/config";
+import path from "path";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, ".env") });
 import express from "express";
 import connectDB from "./config/db.js";
 import cors from "cors";
@@ -14,11 +20,6 @@ import { verifyDatabaseReadiness, getReadinessStatus } from "./config/indexReadi
 import { verifyEmailConfig } from "./services/emailService.js";
 import { csrfGuard } from "./middlewares/csrfGuard.js";
 
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 
