@@ -58,6 +58,14 @@ const checkResetOtp = async (sanitizedEmail, otp) => {
     return { ok: true, record };
 };
 
+const isRequestSecure = (req) => {
+    return Boolean(
+        process.env.NODE_ENV === "production" ||
+        req.secure ||
+        req.headers["x-forwarded-proto"] === "https"
+    );
+};
+
 // Extract the auth token from the Authorization header or the auth_token
 // cookie (same precedence as the auth middlewares).
 const readToken = (req) => {
@@ -105,11 +113,11 @@ const registerUser = asyncHandler(async (req, res) => {
     const token = generateToken(user._id);
 
     // Set secure, HttpOnly cookie for XSS protection
-    const isProduction = process.env.NODE_ENV === "production";
+    const secure = isRequestSecure(req);
     res.cookie("auth_token", token, {
         httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? "none" : "lax",
+        secure,
+        sameSite: secure ? "none" : "lax",
         maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 
@@ -152,11 +160,11 @@ const loginUser = asyncHandler(async (req, res) => {
     const token = generateToken(user._id);
 
     // Set secure, HttpOnly cookie for XSS protection
-    const isProduction = process.env.NODE_ENV === "production";
+    const secure = isRequestSecure(req);
     res.cookie("auth_token", token, {
         httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? "none" : "lax",
+        secure,
+        sameSite: secure ? "none" : "lax",
         maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 
@@ -338,11 +346,11 @@ const logoutUser = asyncHandler(async (req, res) => {
         // Invalid/expired token — nothing to revoke; still clear the cookie below.
     }
 
-    const isProduction = process.env.NODE_ENV === "production";
+    const secure = isRequestSecure(req);
     res.cookie("auth_token", "", {
         httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? "none" : "lax",
+        secure,
+        sameSite: secure ? "none" : "lax",
         expires: new Date(0) // Expire immediately
     });
     res.status(200).json({ message: "Logged out successfully" });

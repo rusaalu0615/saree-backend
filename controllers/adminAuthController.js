@@ -173,11 +173,15 @@ export const verifyAdminOTP = asyncHandler(async (req, res) => {
     // Sign session
     const token = generateToken(user._id);
 
-    const isProduction = process.env.NODE_ENV === "production";
+    const secure = Boolean(
+        process.env.NODE_ENV === "production" ||
+        req.secure ||
+        req.headers["x-forwarded-proto"] === "https"
+    );
     res.cookie("auth_token", token, {
         httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? "none" : "lax",
+        secure,
+        sameSite: secure ? "none" : "lax",
         maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
