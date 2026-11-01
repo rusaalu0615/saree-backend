@@ -250,22 +250,31 @@ const getAllProducts = async (req, res) => {
             }
         }
 
-        // 6. Bounded Pagination: validated default 20, max 100
+        // 6. Bounded Pagination: validated default 20, max 1000. limit=0 or "all" returns all without limit.
         const pageNum = Math.max(1, parseInt(page) || 1);
         let limitNum;
-        if (limit === undefined || limit === null || limit === "") {
+        let isUnlimited = false;
+
+        if (limit === "0" || limit === 0 || limit === "all") {
+            isUnlimited = true;
+        } else if (limit === undefined || limit === null || limit === "") {
             limitNum = 20; // default page size
         } else {
             const parsed = parseInt(limit);
-            if (isNaN(parsed) || parsed <= 0) {
+            if (isNaN(parsed) || parsed < 0) {
                 limitNum = 20;
+            } else if (parsed === 0) {
+                isUnlimited = true;
             } else {
                 limitNum = Math.min(parsed, 100); // capped at maximum 100
             }
         }
-        const skipNum = (pageNum - 1) * limitNum;
 
-        const query = productModal.find(filter, projection).sort(sort).lean().skip(skipNum).limit(limitNum);
+        let query = productModal.find(filter, projection).sort(sort).lean();
+        if (!isUnlimited) {
+            const skipNum = (pageNum - 1) * limitNum;
+            query = query.skip(skipNum).limit(limitNum);
+        }
 
         const [products, totalProducts] = await Promise.all([
             query,
@@ -276,10 +285,10 @@ const getAllProducts = async (req, res) => {
             success: true,
             products,
             pagination: {
-                currentPage: pageNum,
-                totalPages: Math.max(1, Math.ceil(totalProducts / limitNum)),
+                currentPage: isUnlimited ? 1 : pageNum,
+                totalPages: isUnlimited ? 1 : Math.max(1, Math.ceil(totalProducts / limitNum)),
                 totalProducts,
-                limit: limitNum
+                limit: isUnlimited ? totalProducts : limitNum
             }
         });
     } catch (error) {
@@ -566,6 +575,28 @@ const updateProduct = async (req, res) => {
             updateData.stock = s;
         }
 
+        // Synchronize collection and boolean flags
+        if (updateData.productCollection !== undefined) {
+            if (updateData.isFestive === undefined) {
+                updateData.isFestive = updateData.productCollection === "festive";
+            }
+            if (updateData.isOnSale === undefined && (updateData.productCollection === "big-sale" || updateData.productCollection === "sale")) {
+                updateData.isOnSale = true;
+            }
+        }
+        if (updateData.isFestive === true && !updateData.productCollection) {
+            updateData.productCollection = "festive";
+        }
+        if (updateData.isFestive === false && updateData.productCollection === "festive") {
+            updateData.productCollection = "";
+        }
+        if (updateData.isOnSale === true && !updateData.productCollection) {
+            updateData.productCollection = "big-sale";
+        }
+        if (updateData.isOnSale === false && (updateData.productCollection === "big-sale" || updateData.productCollection === "sale")) {
+            updateData.productCollection = "";
+        }
+
         // Concurrency guard: if expectedStock is provided, assert stock hasn't changed
         const updateFilter = { _id: id };
         if (req.body.expectedStock !== undefined) {
@@ -752,6 +783,28 @@ const quickUpdateProduct = async (req, res) => {
                 });
             }
             updates.stock = s;
+        }
+
+        // Synchronize collection and boolean flags
+        if (updates.productCollection !== undefined) {
+            if (updates.isFestive === undefined) {
+                updates.isFestive = updates.productCollection === "festive";
+            }
+            if (updates.isOnSale === undefined && (updates.productCollection === "big-sale" || updates.productCollection === "sale")) {
+                updates.isOnSale = true;
+            }
+        }
+        if (updates.isFestive === true && !updates.productCollection) {
+            updates.productCollection = "festive";
+        }
+        if (updates.isFestive === false && updates.productCollection === "festive") {
+            updates.productCollection = "";
+        }
+        if (updates.isOnSale === true && !updates.productCollection) {
+            updates.productCollection = "big-sale";
+        }
+        if (updates.isOnSale === false && (updates.productCollection === "big-sale" || updates.productCollection === "sale")) {
+            updates.productCollection = "";
         }
 
         // Concurrency guard: if expectedStock is provided, assert stock hasn't changed
