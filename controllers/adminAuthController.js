@@ -14,19 +14,6 @@ const getWhitelistedEmails = () => {
         .filter(Boolean);
 };
 
-// Helper to check if email is an authorized admin (via env whitelist or DB role)
-const isAuthorizedAdmin = async (sanitizedEmail) => {
-    const whitelist = getWhitelistedEmails();
-    if (whitelist.includes(sanitizedEmail)) {
-        return true;
-    }
-    // Also check database if the user has role 'admin'
-    const user = await User.findOne({
-        email: { $regex: new RegExp(`^${sanitizedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
-    });
-    return !!(user && user.role === "admin");
-};
-
 const OTP_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_ATTEMPTS = 3;
 
@@ -42,10 +29,11 @@ export const sendAdminOTP = asyncHandler(async (req, res) => {
     }
 
     const sanitizedEmail = email.trim().toLowerCase();
-    const authorized = await isAuthorizedAdmin(sanitizedEmail);
+    const whitelist = getWhitelistedEmails();
+    const isWhitelisted = whitelist.includes(sanitizedEmail);
 
-    if (!authorized) {
-        console.log(`[Admin Auth] Access request for non-authorized email: ${sanitizedEmail}`);
+    if (!isWhitelisted) {
+        console.log(`[Admin Auth] Access request for non-whitelisted email: ${sanitizedEmail}`);
         return res.status(403).json({
             success: false,
             message: "This email is not authorized for admin access. Please use an approved admin email.",
@@ -108,9 +96,10 @@ export const verifyAdminOTP = asyncHandler(async (req, res) => {
     }
 
     const sanitizedEmail = email.trim().toLowerCase();
-    const authorized = await isAuthorizedAdmin(sanitizedEmail);
+    const whitelist = getWhitelistedEmails();
+    const isWhitelisted = whitelist.includes(sanitizedEmail);
 
-    if (!authorized) {
+    if (!isWhitelisted) {
         return res.status(403).json({ message: "Unauthorized email." });
     }
 

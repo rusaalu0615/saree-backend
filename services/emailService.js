@@ -76,6 +76,7 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
         const transporter = getTransporter();
 
         const hasValidPdf = pdfBuffer && Buffer.isBuffer(pdfBuffer) && pdfBuffer.length > 0;
+        const storeUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://handloomer.com";
 
         const safeFirstName = escapeHtml(order.shippingAddress?.firstName || "Customer");
         const safeLastName = escapeHtml(order.shippingAddress?.lastName || "");
@@ -174,6 +175,15 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
                         </div>
                         
                         ${invoiceNote}
+
+                        <div style="text-align: center; margin: 35px 0 15px;">
+                            <a href="${storeUrl}/orders" style="background-color: #8B7355; color: #ffffff; padding: 14px 28px; text-decoration: none; font-size: 14px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; border-radius: 4px; display: inline-block;">
+                                View Your Order
+                            </a>
+                            <p style="margin-top: 10px; font-size: 12px; color: #777;">
+                                Track fulfillment status, download invoice, and access order history anytime.
+                            </p>
+                        </div>
                     </div>
                 </div>
             `,
@@ -237,6 +247,7 @@ export const sendShippingUpdateEmail = async (order, status) => {
     const safeFirstName = escapeHtml(order.shippingAddress?.firstName || "Customer");
     const safeAwb = escapeHtml(order.shiprocket?.awbCode || "");
     const safeCourier = escapeHtml(order.shiprocket?.courierName || "Assigned Courier");
+    const storeUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://handloomer.com";
 
     if (status === "shipped") {
         subject = `Your Order ${order.orderId} has Shipped!`;
@@ -277,7 +288,12 @@ export const sendShippingUpdateEmail = async (order, status) => {
                         ` : ""}
                     </div>
                     
-                    <p>You can track your order live on our website.</p>
+                    <p style="margin-bottom: 20px;">You can track your order live on our website.</p>
+                    <div style="text-align: center; margin: 25px 0 15px;">
+                        <a href="${storeUrl}/orders" style="background-color: #8B7355; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; border-radius: 4px; display: inline-block;">
+                            View Order Details
+                        </a>
+                    </div>
                 </div>
             </div>
         `,

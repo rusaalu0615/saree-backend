@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import Order from "../models/orderModal.js";
 import Product from "../models/productModal.js";
@@ -329,10 +330,50 @@ const createOrder = asyncHandler(async (req, res) => {
         );
         const shippingPaise = subtotalPaise >= toPaise(999) ? 0 : toPaise(199);
 
-        // Determine User ID — Guests NEVER adopt registered accounts.
+        // Determine User ID — Link to existing account or silently auto-create for guest
         const isGuest = !req.user;
+        const shippingEmail = shippingAddress.email ? String(shippingAddress.email).trim().toLowerCase() : "";
         if (!isGuest) {
             orderUserId = req.user._id;
+        } else if (shippingEmail) {
+            let existingUser = await User.findOne({
+                email: { $regex: new RegExp(`^${shippingEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+            }).session(session);
+
+            if (existingUser) {
+                orderUserId = existingUser._id;
+            } else {
+                try {
+                    const customerName = `${shippingAddress.firstName || ""} ${shippingAddress.lastName || ""}`.trim() || "Customer";
+                    const randomPassword = crypto.randomBytes(16).toString("hex");
+                    const hashedPassword = await bcrypt.hash(randomPassword, 10);
+                    const [newUser] = await User.create(
+                        [
+                            {
+                                name: customerName,
+                                email: shippingEmail,
+                                phone: shippingAddress.phone || "N/A",
+                                password: hashedPassword,
+                                role: "user",
+                            },
+                        ],
+                        { session }
+                    );
+                    if (newUser) {
+                        orderUserId = newUser._id;
+                        console.log(`[createOrder] Silently auto-created customer account for ${shippingEmail}: ${newUser._id}`);
+                    }
+                } catch (userCreateErr) {
+                    const fallbackUser = await User.findOne({
+                        email: { $regex: new RegExp(`^${shippingEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+                    }).session(session);
+                    if (fallbackUser) {
+                        orderUserId = fallbackUser._id;
+                    } else {
+                        console.warn("[createOrder] User auto-creation notice:", userCreateErr.message);
+                    }
+                }
+            }
         } else {
             orderUserId = undefined;
         }
@@ -1522,13 +1563,21 @@ const getUserOrders = asyncHandler(async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 50);
     const skip = (page - 1) * limit;
 
+    const userEmail = (req.user.email || "").trim().toLowerCase();
+    const orderFilter = {
+        $or: [
+            { user: req.user._id },
+            ...(userEmail ? [{ "shippingAddress.email": { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } }] : []),
+        ],
+    };
+
     const [orders, total] = await Promise.all([
-        Order.find({ user: req.user._id, isGuest: { $ne: true } })
+        Order.find(orderFilter)
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit)
             .select("-__v -payment.checkoutTokenHash -payment.razorpaySignature"),
-        Order.countDocuments({ user: req.user._id, isGuest: { $ne: true } }),
+        Order.countDocuments(orderFilter),
     ]);
 
     const enrichedOrders = orders.map((order) => {
@@ -1550,7 +1599,14 @@ const getUserOrders = asyncHandler(async (req, res) => {
 
 /** GET /api/order/:id — single order details (own order only) */
 const getOrderById = asyncHandler(async (req, res) => {
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id, isGuest: { $ne: true } })
+    const userEmail = (req.user.email || "").trim().toLowerCase();
+    const order = await Order.findOne({
+        _id: req.params.id,
+        $or: [
+            { user: req.user._id },
+            ...(userEmail ? [{ "shippingAddress.email": { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } }] : []),
+        ],
+    })
         .populate("items.productId", "name mainImage")
         .select("-payment.checkoutTokenHash -payment.razorpaySignature");
 
@@ -1581,11 +1637,14 @@ const cancelUserOrder = asyncHandler(async (req, res) => {
         throw new AppError("Order not found", 404);
     }
 
-    // Resolve order with BOTH order ID AND authenticated owner ID
+    // Resolve order with BOTH order ID AND authenticated owner ID or email
+    const userEmail = (req.user.email || "").trim().toLowerCase();
     const order = await Order.findOne({
         _id: req.params.id,
-        user: req.user._id,
-        isGuest: { $ne: true },
+        $or: [
+            { user: req.user._id },
+            ...(userEmail ? [{ "shippingAddress.email": { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } }] : []),
+        ],
     });
     if (!order) {
         throw new AppError("Order not found", 404);

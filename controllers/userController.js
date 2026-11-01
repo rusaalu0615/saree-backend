@@ -305,7 +305,7 @@ const resetPassword = asyncHandler(async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedPassword;
     // Invalidate every session issued before this moment (all devices).
-    user.passwordChangedAt = new Date();
+    user.passwordChangedAt = new Date(Date.now() - 1000);
     await user.save();
 
     // Delete any remaining OTPs for this email and purpose so codes cannot be replayed.
