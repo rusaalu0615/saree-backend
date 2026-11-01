@@ -1,4 +1,5 @@
 import CelebrityBanner from "../models/celebrityBannerModal.js";
+import MarketingCollection from "../models/marketingCollectionModal.js";
 import { uploadImage } from "../utils/r2Upload.js";
 import { pickSchemaFields } from "../utils/security.js";
 
@@ -44,6 +45,30 @@ export const upsertCelebrityBanner = async (req, res) => {
             setDefaultsOnInsert: true,
             runValidators: true
         });
+
+        // Keep MarketingCollection in sync
+        const marketingData = {
+            ...(updateData.badge && { badge: updateData.badge }),
+            ...(updateData.tagline && { tagline: updateData.tagline }),
+            ...(updateData.titleColorPart && { titleColorPart: updateData.titleColorPart }),
+            ...(updateData.titleItalicPart && { titleItalicPart: updateData.titleItalicPart }),
+            ...(updateData.description && { description: updateData.description }),
+            ...(updateData.buttonText && { buttonText: updateData.buttonText }),
+            ...(updateData.link && { link: updateData.link }),
+            ...(updateData.image && { image: updateData.image }),
+        };
+        if (updateData.stat1Number || updateData.stat1Label || updateData.stat2Number || updateData.stat2Label || updateData.stat3Number || updateData.stat3Label) {
+            marketingData.stats = [
+                { number: updateData.stat1Number || "500+", label: updateData.stat1Label || "Styles" },
+                { number: updateData.stat2Number || "20+", label: updateData.stat2Label || "Celebrities" },
+                { number: updateData.stat3Number || "5★", label: updateData.stat3Label || "Rating" }
+            ];
+        }
+        await MarketingCollection.findOneAndUpdate(
+            { key: "celebrity" },
+            marketingData,
+            { returnDocument: 'after', new: true, upsert: true }
+        ).catch(err => console.warn("Sync celebrity marketing collection error:", err));
 
         res.status(200).json({
             success: true,

@@ -103,7 +103,7 @@ export const updateMarketingCollection = async (req, res) => {
         const collection = await MarketingCollection.findOneAndUpdate(
             { key },
             updateData,
-            { new: true, runValidators: true }
+            { returnDocument: 'after', new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
         );
 
         if (!collection) {
@@ -168,6 +168,26 @@ export const getCollectionByKey = async (req, res) => {
                     image: "/images/designer-saree.jpg"
                 }
             };
+
+            if (!defaultCollections[key] && key === "celebrity") {
+                defaultCollections["celebrity"] = {
+                    key: "celebrity",
+                    name: "Celebrity Collection",
+                    badge: "Celebrity Choice",
+                    tagline: "Celebrity Collection",
+                    titleColorPart: "Dress Like a",
+                    titleItalicPart: "Star",
+                    description: "Discover the exclusive collection favored by icons. Our Celebrity Collection brings red-carpet elegance to your wardrobe with premium linen sarees and sophisticated designs.",
+                    buttonText: "Explore Collection",
+                    link: "/collections/celebrity",
+                    image: "/images/celebrity-collection.png",
+                    stats: [
+                        { number: "500+", label: "Styles" },
+                        { number: "20+", label: "Celebrities" },
+                        { number: "5★", label: "Rating" }
+                    ]
+                };
+            }
 
             if (Object.prototype.hasOwnProperty.call(defaultCollections, key)) {
                 try {

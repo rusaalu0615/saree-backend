@@ -1,4 +1,5 @@
 import FestiveSale from "../models/festiveSaleModal.js";
+import MarketingCollection from "../models/marketingCollectionModal.js";
 import { uploadImage } from "../utils/r2Upload.js";
 
 // Fetch Festive Sale data
@@ -50,6 +51,20 @@ export const updateFestiveSale = async (req, res) => {
         }
 
         await festiveSale.save();
+
+        await MarketingCollection.findOneAndUpdate(
+            { key: "big-sale" },
+            {
+                ...(title1 && { title1 }),
+                ...(title2 && { title2 }),
+                ...(offer && { offer }),
+                ...(description && { description }),
+                ...(buttonText && { buttonText }),
+                ...(link && { link }),
+                ...(festiveSale.image && { image: festiveSale.image }),
+            },
+            { returnDocument: 'after', new: true, upsert: true }
+        ).catch(err => console.warn("Sync big-sale marketing collection error:", err));
 
         res.status(200).json({
             success: true,

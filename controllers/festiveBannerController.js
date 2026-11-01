@@ -1,4 +1,5 @@
 import FestiveBanner from "../models/festiveBannerModal.js";
+import MarketingCollection from "../models/marketingCollectionModal.js";
 import { uploadImage } from "../utils/r2Upload.js";
 
 // Fetch Festive Banner data
@@ -50,6 +51,20 @@ export const updateFestiveBanner = async (req, res) => {
         }
 
         await festiveBanner.save();
+
+        await MarketingCollection.findOneAndUpdate(
+            { key: "festive" },
+            {
+                ...(title1 && { title1 }),
+                ...(title2 && { title2 }),
+                ...(offer && { offer }),
+                ...(description && { description }),
+                ...(buttonText && { buttonText }),
+                ...(link && { link }),
+                ...(festiveBanner.image && { image: festiveBanner.image }),
+            },
+            { returnDocument: 'after', new: true, upsert: true }
+        ).catch(err => console.warn("Sync festive marketing collection error:", err));
 
         res.status(200).json({
             success: true,
