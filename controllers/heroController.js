@@ -6,7 +6,6 @@ export const getHero = async (req, res) => {
     try {
         let hero = await Hero.findOne();
 
-        // If no hero section document exists yet, create one with default values
         if (!hero) {
             hero = await Hero.create({ slides: [] });
         }
@@ -27,7 +26,7 @@ export const getHero = async (req, res) => {
 // Add a new Hero slide
 export const addHeroSlide = async (req, res) => {
     try {
-        const { title, subtitle, description, category, link } = req.body;
+        const { title, subtitle, description, category, link, buttonText, secondaryButtonText, secondaryLink, badge, layoutStyle } = req.body;
         const image = req.file;
 
         if (!image) {
@@ -35,8 +34,6 @@ export const addHeroSlide = async (req, res) => {
         }
 
         let hero = await Hero.findOne();
-
-        // If no hero exists, create a new one first
         if (!hero) {
             hero = new Hero({ slides: [] });
         }
@@ -45,11 +42,16 @@ export const addHeroSlide = async (req, res) => {
         const imageUrl = await uploadImage(image.buffer, image.originalname);
 
         hero.slides.push({
-            title,
-            subtitle,
-            description,
-            category,
-            link,
+            title: title || "",
+            subtitle: subtitle || "",
+            description: description || "",
+            category: category || "",
+            link: link || "/collections",
+            buttonText: buttonText || "Explore Collection",
+            secondaryButtonText: secondaryButtonText || "",
+            secondaryLink: secondaryLink || "",
+            badge: badge || category || "",
+            layoutStyle: layoutStyle || "editorial-split",
             image: imageUrl
         });
 
@@ -69,6 +71,58 @@ export const addHeroSlide = async (req, res) => {
     }
 };
 
+// Update an existing Hero slide
+export const updateHeroSlide = async (req, res) => {
+    try {
+        const { slideId } = req.params;
+        const { title, subtitle, description, category, link, buttonText, secondaryButtonText, secondaryLink, badge, layoutStyle } = req.body;
+        const image = req.file;
+
+        let hero = await Hero.findOne();
+        if (!hero) {
+            return res.status(404).json({ success: false, message: "Hero document not found" });
+        }
+
+        const slide = hero.slides.id(slideId) || hero.slides.find(s => s._id.toString() === slideId);
+        if (!slide) {
+            return res.status(404).json({ success: false, message: "Slide not found" });
+        }
+
+        if (title !== undefined) slide.title = title;
+        if (subtitle !== undefined) slide.subtitle = subtitle;
+        if (description !== undefined) slide.description = description;
+        if (category !== undefined) slide.category = category;
+        if (link !== undefined) slide.link = link;
+        if (buttonText !== undefined) slide.buttonText = buttonText;
+        if (secondaryButtonText !== undefined) slide.secondaryButtonText = secondaryButtonText;
+        if (secondaryLink !== undefined) slide.secondaryLink = secondaryLink;
+        if (badge !== undefined) slide.badge = badge;
+        if (layoutStyle !== undefined) slide.layoutStyle = layoutStyle;
+
+        if (image) {
+            if (slide.image && !slide.image.startsWith('/images/')) {
+                deleteFromR2(slide.image).catch(() => {});
+            }
+            const imageUrl = await uploadImage(image.buffer, image.originalname);
+            slide.image = imageUrl;
+        }
+
+        await hero.save();
+
+        res.status(200).json({
+            success: true,
+            message: "Slide updated successfully",
+            slides: hero.slides
+        });
+    } catch (error) {
+        console.error("Error updating hero slide:", error);
+        res.status(500).json({
+            success: false,
+            message: "Internal server error"
+        });
+    }
+};
+
 // Delete a Hero slide
 export const deleteHeroSlide = async (req, res) => {
     try {
@@ -80,7 +134,7 @@ export const deleteHeroSlide = async (req, res) => {
         }
 
         const slideToDelete = hero.slides.find(slide => slide._id.toString() === slideId);
-        if (slideToDelete?.image) {
+        if (slideToDelete?.image && !slideToDelete.image.startsWith('/images/')) {
             deleteFromR2(slideToDelete.image).catch(() => {});
         }
 
@@ -100,4 +154,3 @@ export const deleteHeroSlide = async (req, res) => {
         });
     }
 };
-

@@ -7,31 +7,51 @@ const slideSchema = new mongoose.Schema({
     },
     title: {
         type: String,
-        required: true
+        default: ""
     },
     subtitle: {
         type: String,
-        required: true
+        default: ""
     },
     description: {
         type: String,
-        required: true
+        default: ""
     },
     category: {
         type: String,
-        required: true
+        default: ""
     },
     link: {
         type: String,
-        required: true
+        default: "/collections"
+    },
+    buttonText: {
+        type: String,
+        default: "Explore Collection"
+    },
+    secondaryButtonText: {
+        type: String,
+        default: ""
+    },
+    secondaryLink: {
+        type: String,
+        default: ""
+    },
+    badge: {
+        type: String,
+        default: ""
+    },
+    layoutStyle: {
+        type: String,
+        default: "editorial-split"
     }
-});
+}, { strict: false });
 
 const heroSchema = new mongoose.Schema({
     slides: {
         type: [slideSchema],
         default: []
     }
-}, { timestamps: true })
+}, { timestamps: true });
 
-export default mongoose.model("Hero", heroSchema)
+export default mongoose.model("Hero", heroSchema);
