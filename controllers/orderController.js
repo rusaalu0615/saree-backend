@@ -298,6 +298,11 @@ const createOrder = asyncHandler(async (req, res) => {
         if (!priceMap.has(pid)) {
             throw new AppError("One or more items in your cart are no longer available. Please review your cart.", 400);
         }
+        const dbP = priceMap.get(pid);
+        const requestedQty = qtyByProduct.get(pid) || 1;
+        if (typeof dbP.stock === 'number' && (dbP.stock < requestedQty || dbP.stock <= 0)) {
+            throw new AppError(`"${dbP.name}" is currently out of stock (${dbP.stock} available). Please remove it from your cart.`, 400);
+        }
     }
 
     // Stock check + deduction as an atomic conditional bulk update
