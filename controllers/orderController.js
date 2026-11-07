@@ -328,7 +328,8 @@ const createOrder = asyncHandler(async (req, res) => {
             (sum, pid) => sum + toPaise(priceMap.get(pid).price) * qtyByProduct.get(pid),
             0
         );
-        const shippingPaise = subtotalPaise >= toPaise(999) ? 0 : toPaise(199);
+        // Temporarily 0 for all orders (Free Shipping) — to restore: subtotalPaise >= toPaise(999) ? 0 : toPaise(199);
+        const shippingPaise = 0;
 
         // Determine User ID — Link to existing account or silently auto-create for guest
         const isGuest = !req.user;
