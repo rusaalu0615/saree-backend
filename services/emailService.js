@@ -232,6 +232,10 @@ export const verifyEmailConfig = async () => {
  * @param {String} status - The new status (shipped, in_transit, etc)
  */
 export const sendShippingUpdateEmail = async (order, status) => {
+    if (status === "cancelled") {
+        return sendOrderCancelledEmail(order);
+    }
+
     if (status !== "shipped" && status !== "out_for_delivery" && status !== "delivered") {
         return { status: "skipped", reason: "status_not_emailed" };
     }
@@ -308,6 +312,100 @@ export const sendShippingUpdateEmail = async (order, status) => {
         return { status: "sent", messageId: info.messageId, accepted: info.accepted };
     } catch (err) {
         console.error("[Email Error] Failed to send shipping update:", err.message);
+        throw err;
+    }
+};
+
+/**
+ * Send Order Cancelled Email
+ * @param {Object} order - The DB order object
+ */
+export const sendOrderCancelledEmail = async (order) => {
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+        throw Object.assign(new Error("[Email] EMAIL_USER/EMAIL_PASS not set — cannot send cancellation email"), { permanent: true });
+    }
+
+    const recipientEmail = order.shippingAddress?.email;
+    if (!recipientEmail) {
+        console.warn(`[Email] Skipping cancellation email for order ${order.orderId}: no recipient email address`);
+        return { status: "skipped", reason: "no_recipient_email" };
+    }
+
+    const safeOrderId = escapeHtml(order.orderId || "");
+    const safeFirstName = escapeHtml(order.shippingAddress?.firstName || "Customer");
+    const safeReason = escapeHtml(order.cancellation?.reason || "Cancelled as requested");
+    const storeUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://handloomer.com";
+    const isPaid = order.payment?.status === "paid" || order.payment?.status === "refunded" || (order.payment?.amountPaid > 0);
+    const rawRefundAmount = order.payment?.refundedAmount || order.payment?.amountPaid || order.pricing?.total || 0;
+    // Format amount cleanly: if in paise (> 1000 and total matches / 100), handle properly
+    const refundFormatted = Number(rawRefundAmount > 100 && rawRefundAmount === order.payment?.amountPaid && order.payment?.amountPaid > order.pricing?.total ? rawRefundAmount / 100 : rawRefundAmount).toLocaleString("en-IN");
+
+    const transporter = getTransporter();
+
+    const mailOptions = {
+        from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
+        to: recipientEmail,
+        subject: `Your Order ${safeOrderId} has been Cancelled`,
+        html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+                <div style="text-align: center; padding: 24px 0 16px;">
+                    <h1 style="color: #8B7355; margin: 0; font-size: 26px; letter-spacing: 1px;">MS HANDLOOM</h1>
+                </div>
+                
+                <div style="padding: 24px; background-color: #fdfaf6; border-radius: 8px; border: 1px solid #e8dfd5;">
+                    <h2 style="margin-top: 0; color: #8B7355; font-size: 20px;">Order Cancellation Notice</h2>
+                    <p style="font-size: 15px; line-height: 1.5;">Hi ${safeFirstName},</p>
+                    <p style="font-size: 15px; line-height: 1.5; color: #444;">
+                        Your order <strong>${safeOrderId}</strong> has been cancelled.
+                    </p>
+                    
+                    <div style="margin: 20px 0; padding: 18px; background-color: #ffffff; border: 1px solid #ebd8c8; border-radius: 6px;">
+                        <p style="margin: 0 0 10px 0; font-size: 14px; color: #555;">
+                            <strong>Order Number:</strong> ${safeOrderId}
+                        </p>
+                        <p style="margin: 0 0 10px 0; font-size: 14px; color: #555;">
+                            <strong>Reason for Cancellation:</strong> ${safeReason}
+                        </p>
+                        ${isPaid ? `
+                            <div style="margin-top: 12px; padding: 10px; background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 4px;">
+                                <p style="margin: 0; font-size: 14px; color: #166534; font-weight: 500;">
+                                    Refund of ₹${refundFormatted} has been initiated to your original payment method. Depending on your bank, it will reflect within 5-7 business days.
+                                </p>
+                            </div>
+                        ` : `
+                            <p style="margin: 0; font-size: 14px; color: #666;">
+                                <strong>Payment Method:</strong> Cash on Delivery (no amount was charged).
+                            </p>
+                        `}
+                    </div>
+
+                    <p style="font-size: 14px; color: #666; margin-bottom: 24px; line-height: 1.5;">
+                        If you have any questions or this cancellation was made in error, please reply to this email or reach out to our support team.
+                    </p>
+                    
+                    <div style="text-align: center; margin: 25px 0 10px;">
+                        <a href="${storeUrl}/shop" style="background-color: #8B7355; color: #ffffff; padding: 12px 28px; text-decoration: none; font-size: 13px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; border-radius: 4px; display: inline-block;">
+                            Continue Shopping
+                        </a>
+                    </div>
+                </div>
+                
+                <div style="text-align: center; padding: 16px 0; font-size: 12px; color: #999;">
+                    © ${new Date().getFullYear()} MS Handloom. All rights reserved.
+                </div>
+            </div>
+        `,
+    };
+
+    try {
+        const info = await transporter.sendMail(mailOptions);
+        if (info.rejected && info.rejected.length > 0 && (!info.accepted || info.accepted.length === 0)) {
+            throw Object.assign(new Error(`SMTP rejected all recipients: ${info.rejected.join(", ")}`), { permanent: true });
+        }
+        console.log(`[Email] Cancellation email sent for order ${safeOrderId}: ${info.messageId}`);
+        return { status: "sent", messageId: info.messageId, accepted: info.accepted };
+    } catch (err) {
+        console.error("[Email Error] Failed to send cancellation email:", err.message);
         throw err;
     }
 };
@@ -489,6 +587,7 @@ export default {
     sendOrderConfirmationEmail,
     verifyEmailConfig,
     sendShippingUpdateEmail,
+    sendOrderCancelledEmail,
     sendAdminOTPEmail,
     sendPasswordResetOTPEmail,
     sendAdminOrderNotificationEmail,

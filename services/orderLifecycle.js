@@ -107,7 +107,7 @@ export async function withTransaction(fn) {
  *    was already released → durable fulfillment hold, NOT dispatch).
  */
 export async function confirmPaymentCaptured(orderId, { paymentId, amountPaise, source }, followUp = { fulfill: true, email: true }) {
-    return withTransaction(async (session) => {
+    const claimed = await withTransaction(async (session) => {
         // Conditional claim — requires the CURRENT state to still be payable.
         const set = {
             "payment.status": "paid",
@@ -175,6 +175,11 @@ export async function confirmPaymentCaptured(orderId, { paymentId, amountPaise, 
         }
         return claimed;
     });
+
+    if (claimed && followUp?.email) {
+        triggerImmediateEmailSweep();
+    }
+    return claimed;
 }
 
 /**
@@ -617,6 +622,21 @@ export async function adoptGatewayRefund(orderId, { refundId, amountPaise, gatew
 // EMAIL OUTBOX — enqueue is part of success transitions, delivery is a worker
 // ===========================================================================
 
+/**
+ * Fire an immediate background sweep to deliver queued emails without waiting for the cron sweeper.
+ * Uses dynamic import and setImmediate to ensure current DB transaction commits first and avoid ESM cycles.
+ */
+export function triggerImmediateEmailSweep() {
+    setImmediate(async () => {
+        try {
+            const { runEmailSweep } = await import("./emailWorker.js");
+            await runEmailSweep(20);
+        } catch (err) {
+            console.error("[Email] Immediate email sweep error:", err.message);
+        }
+    });
+}
+
 export async function enqueueEmails(order, session) {
     const jobs = [
         { dedupeKey: `confirm:${order._id}`, kind: "order_confirmation", order: order._id },
@@ -625,15 +645,22 @@ export async function enqueueEmails(order, session) {
     for (const job of jobs) {
         await EmailJob.updateOne({ dedupeKey: job.dedupeKey }, { $setOnInsert: job }, { upsert: true, session });
     }
+    if (!session) {
+        triggerImmediateEmailSweep();
+    }
 }
 
 /** Queue a shipping/status update email (idempotent per order+status). */
 export async function enqueueShippingEmail(orderId, status, { session } = {}) {
-    return await EmailJob.updateOne(
+    const res = await EmailJob.updateOne(
         { dedupeKey: `ship:${orderId}:${status}` },
         { $setOnInsert: { kind: "shipping_update", order: orderId, statusParam: status, state: "queued", nextAttemptAt: new Date() } },
         { upsert: true, session }
     );
+    if (!session) {
+        triggerImmediateEmailSweep();
+    }
+    return res;
 }
 
 /**
@@ -645,6 +672,7 @@ export async function enqueueOrderEmails(orderId) {
     const order = await Order.findById(orderId);
     if (!order) return false;
     await enqueueEmails(order, null);
+    triggerImmediateEmailSweep();
     return true;
 }
 
@@ -688,6 +716,7 @@ export default {
     enqueueShippingEmail,
     enqueueOrderEmails,
     scheduleFulfillment,
+    triggerImmediateEmailSweep,
     backoffDate,
 };
 

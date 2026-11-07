@@ -55,7 +55,7 @@ const {
     RESERVATION_WINDOW_MS,
 } = __lifecycle;
 
-const SWEEP_INTERVAL_MS = Number(process.env.SWEEPER_INTERVAL_MS || 5 * 60 * 1000);
+const SWEEP_INTERVAL_MS = Number(process.env.SWEEPER_INTERVAL_MS || 60 * 1000);
 const BATCH = Number(process.env.SWEEPER_BATCH || 25);
 const CLAIM_LEASE_MS = Number(process.env.SWEEPER_CLAIM_LEASE_MS || 120000);
 

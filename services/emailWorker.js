@@ -151,6 +151,9 @@ export async function deliver(job) {
         } else if (job.kind === "shipping_update") {
             if (ownershipLost) return;
             result = await emailService.sendShippingUpdateEmail(order, job.statusParam || order.status);
+        } else if (job.kind === "order_cancelled") {
+            if (ownershipLost) return;
+            result = await emailService.sendOrderCancelledEmail(order);
         } else {
             throw new Error(`unknown_email_kind:${job.kind}`);
         }
