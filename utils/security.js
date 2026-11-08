@@ -42,7 +42,20 @@ export const hashToken = (token) =>
 // Monetary helpers: all checkout math runs in INTEGER PAISE so float drift
 // (0.1 + 0.2) can never create a cent-level mismatch against the gateway.
 export const toPaise = (rupees) => Math.round(Number(rupees) * 100);
-export const toRupees = (paise) => Math.round(Number(paise)) / 100;
+export const paiseToRupees = (paise) => Math.round(Number(paise || 0)) / 100;
+export const toRupees = paiseToRupees;
+
+export const formatRupeesAsINR = (rupees) => {
+    const num = Number(rupees || 0);
+    return num.toLocaleString("en-IN", {
+        minimumFractionDigits: num % 1 === 0 ? 0 : 2,
+        maximumFractionDigits: 2,
+    });
+};
+
+export const formatPaiseAsINR = (paise) => {
+    return formatRupeesAsINR(paiseToRupees(paise));
+};
 
 // Keys that must never be written straight from a request body.
 const FORBIDDEN_KEYS = new Set(["_id", "id", "__v", "createdAt", "updatedAt"]);

@@ -8,7 +8,7 @@ import Order from "../models/orderModal.js";
 import AppError from "../utils/AppError.js";
 import shiprocket from "./shiprocket.js";
 import razorpayInstance from "../config/razorpay.js";
-import { toRupees, toPaise } from "../utils/security.js";
+import { toRupees, toPaise, paiseToRupees, formatPaiseAsINR } from "../utils/security.js";
 import {
     requestCancellation,
     recordCourierOutcome,
@@ -180,6 +180,9 @@ export function buildCustomerCancellationSummary(order) {
 
 /**
  * Build customer-safe refund summary.
+ * Returns non-null ONLY when an actual refund lifecycle exists
+ * (requested, pending, processed, failed, refunded, or paid cancellation).
+ * Never returns a fake refund summary for ordinary placed/paid orders.
  */
 export function buildCustomerRefundSummary(order) {
     if (!order) return null;
@@ -188,11 +191,13 @@ export function buildCustomerRefundSummary(order) {
         return null;
     }
 
-    const hasRefundRecord = !!order.refund?.status || !!order.refund?.razorpayRefundId;
+    const hasRefundRecord = Boolean(order.refund?.status || order.refund?.razorpayRefundId);
     const isPaymentRefunded = order.payment?.status === "refunded" || (order.payment?.refundedAmount || 0) > 0;
     const isCancelled = order.status === "cancelled" || order.cancellation?.status === "completed";
+    const wasPaid = order.payment?.status === "paid" || (order.payment?.amountPaid || 0) > 0;
 
-    if (!hasRefundRecord && !isPaymentRefunded && !isCancelled && order.payment?.status !== "paid") {
+    // A normal placed/paid order that is not cancelled and has no refund record is NOT a refund!
+    if (!hasRefundRecord && !isPaymentRefunded && !(isCancelled && wasPaid)) {
         return null;
     }
 
@@ -200,20 +205,35 @@ export function buildCustomerRefundSummary(order) {
     if (!status) {
         if (order.payment?.status === "refunded") {
             status = "processed";
-        } else if (isCancelled && order.payment?.status === "paid") {
+        } else if (isCancelled && wasPaid) {
             status = "pending";
         }
     }
 
-    const amountPaise = order.refund?.amountPaise ||
-        order.refund?.requestedAmountPaise ||
-        order.payment?.refundedAmount ||
-        (order.payment?.status === "paid" ? (order.payment?.amountPaid || Math.round(Number(order.pricing?.total || 0) * 100)) : 0);
+    if (!status) {
+        return null;
+    }
+
+    let amountPaise = 0;
+    if (order.refund?.amountPaise !== undefined && order.refund?.amountPaise !== null && order.refund?.amountPaise > 0) {
+        amountPaise = Number(order.refund.amountPaise);
+    } else if (order.refund?.requestedAmountPaise !== undefined && order.refund?.requestedAmountPaise !== null && order.refund?.requestedAmountPaise > 0) {
+        amountPaise = Number(order.refund.requestedAmountPaise);
+    } else if (order.payment?.refundedAmount !== undefined && order.payment?.refundedAmount !== null && order.payment?.refundedAmount > 0) {
+        amountPaise = Number(order.payment.refundedAmount);
+    } else if (isCancelled && wasPaid) {
+        amountPaise = Number(order.payment?.amountPaid || toPaise(order.pricing?.total || 0));
+    }
+
+    if (!amountPaise || amountPaise <= 0) {
+        return null;
+    }
 
     return {
-        status, // "requested" | "pending" | "processed" | "failed" | null
+        status, // "requested" | "pending" | "processed" | "failed"
         amountPaise,
-        amountRupees: toRupees(amountPaise),
+        amountRupees: paiseToRupees(amountPaise),
+        formattedRupees: formatPaiseAsINR(amountPaise),
         currency: "INR",
         initiatedAt: order.refund?.initiatedAt || null,
         verifiedAt: order.refund?.verifiedAt || null,

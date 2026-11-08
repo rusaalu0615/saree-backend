@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import dns from "dns";
+import { formatPaiseAsINR, toPaise } from "../utils/security.js";
 
 // Force Node.js to prefer IPv4 DNS resolution globally. This completely eliminates ENETUNREACH 
 // errors when attempting to connect to Google SMTP servers in IPv6-unsupported container networks (like Render).
@@ -22,6 +23,7 @@ export const escapeHtml = (str) => {
  * Configure / Reuse Nodemailer transporter
  */
 let cachedTransporter = null;
+export const setTransporterForTest = (t) => { cachedTransporter = t; };
 
 export const getTransporter = () => {
     if (cachedTransporter) return cachedTransporter;
@@ -335,10 +337,21 @@ export const sendOrderCancelledEmail = async (order) => {
     const safeFirstName = escapeHtml(order.shippingAddress?.firstName || "Customer");
     const safeReason = escapeHtml(order.cancellation?.reason || "Cancelled as requested");
     const storeUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://handloomer.com";
-    const isPaid = order.payment?.status === "paid" || order.payment?.status === "refunded" || (order.payment?.amountPaid > 0);
-    const rawRefundAmount = order.payment?.refundedAmount || order.payment?.amountPaid || order.pricing?.total || 0;
-    // Format amount cleanly: if in paise (> 1000 and total matches / 100), handle properly
-    const refundFormatted = Number(rawRefundAmount > 100 && rawRefundAmount === order.payment?.amountPaid && order.payment?.amountPaid > order.pricing?.total ? rawRefundAmount / 100 : rawRefundAmount).toLocaleString("en-IN");
+    const isPaid = (order.payment?.method !== "cod") && (order.payment?.status === "paid" || order.payment?.status === "refunded" || (order.payment?.amountPaid > 0));
+    
+    // Strict money conversion with lifecycle semantics — NO heuristics:
+    let refundPaise = 0;
+    if (order.refund?.amountPaise !== undefined && order.refund?.amountPaise !== null && order.refund?.amountPaise > 0) {
+        refundPaise = Number(order.refund.amountPaise);
+    } else if (order.refund?.requestedAmountPaise !== undefined && order.refund?.requestedAmountPaise !== null && order.refund?.requestedAmountPaise > 0) {
+        refundPaise = Number(order.refund.requestedAmountPaise);
+    } else if (order.payment?.refundedAmount !== undefined && order.payment?.refundedAmount !== null && order.payment?.refundedAmount > 0) {
+        refundPaise = Number(order.payment.refundedAmount);
+    } else if (isPaid && (order.cancellation?.status === "completed" || order.status === "cancelled")) {
+        refundPaise = Number(order.payment?.amountPaid || toPaise(order.pricing?.total || 0));
+    }
+
+    const refundFormatted = formatPaiseAsINR(refundPaise);
 
     const transporter = getTransporter();
 
@@ -366,15 +379,19 @@ export const sendOrderCancelledEmail = async (order) => {
                         <p style="margin: 0 0 10px 0; font-size: 14px; color: #555;">
                             <strong>Reason for Cancellation:</strong> ${safeReason}
                         </p>
-                        ${isPaid ? `
+                        ${isPaid && refundPaise > 0 ? `
                             <div style="margin-top: 12px; padding: 10px; background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 4px;">
                                 <p style="margin: 0; font-size: 14px; color: #166534; font-weight: 500;">
                                     Refund of ₹${refundFormatted} has been initiated to your original payment method. Depending on your bank, it will reflect within 5-7 business days.
                                 </p>
                             </div>
+                        ` : order.payment?.method === "cod" ? `
+                            <p style="margin: 0; font-size: 14px; color: #666;">
+                                <strong>Payment Method:</strong> Cash on Delivery (no payment was collected).
+                            </p>
                         ` : `
                             <p style="margin: 0; font-size: 14px; color: #666;">
-                                <strong>Payment Method:</strong> Cash on Delivery (no amount was charged).
+                                <strong>Payment Method:</strong> Online Payment (no amount was charged).
                             </p>
                         `}
                     </div>

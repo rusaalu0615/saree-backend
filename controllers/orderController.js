@@ -591,6 +591,9 @@ const createOrder = asyncHandler(async (req, res) => {
 export function buildCheckoutOrderResponse(order, checkoutToken) {
     const rawTotal = order.pricing?.total;
     const payablePaise = toPaise(rawTotal !== undefined && rawTotal !== null ? rawTotal : 0);
+    const cod = order.payment?.method === "cod";
+    const zeroPayable = !cod && payablePaise <= 0;
+
     const resp = {
         orderId: order.orderId,
         _id: order._id,
@@ -599,6 +602,19 @@ export function buildCheckoutOrderResponse(order, checkoutToken) {
         paymentMethod: order.payment?.method,
         total: order.pricing?.total ?? 0,
         payablePaise,
+        isZeroPayable: zeroPayable,
+        pricing: {
+            subtotal: order.pricing?.subtotal ?? 0,
+            shipping: order.pricing?.shipping ?? 0,
+            discount: order.pricing?.discount ?? 0,
+            total: order.pricing?.total ?? 0,
+        },
+        shippingAddress: order.shippingAddress ? {
+            firstName: order.shippingAddress.firstName,
+            lastName: order.shippingAddress.lastName,
+            email: order.shippingAddress.email,
+            phone: order.shippingAddress.phone,
+        } : undefined,
         key: process.env.RAZORPAY_KEY_ID, // server is the single source of the publishable key
         checkoutToken: checkoutToken || undefined,
     };
@@ -610,8 +626,6 @@ export function buildCheckoutOrderResponse(order, checkoutToken) {
     const cancelled = order.cancellation?.status === "completed" || order.status === "cancelled";
     const refunded = order.payment?.status === "refunded";
     const paid = order.payment?.status === "paid";
-    const cod = order.payment?.method === "cod";
-    const zeroPayable = !cod && payablePaise <= 0;
     const needsGateway =
         !cod && order.payment?.status === "pending" && payablePaise > 0 && !!order.payment?.razorpayOrderId;
 
@@ -636,6 +650,41 @@ export function buildCheckoutOrderResponse(order, checkoutToken) {
         resp.currency = "INR";
     }
     return resp;
+}
+
+/**
+ * Build safe customer order summary for payment verification / checkout completion.
+ */
+export function buildCustomerOrderSummary(order) {
+    if (!order) return null;
+    const rawTotal = order.pricing?.total;
+    const payablePaise = toPaise(rawTotal !== undefined && rawTotal !== null ? rawTotal : 0);
+    const cod = order.payment?.method === "cod";
+    const isZeroPayable = !cod && payablePaise <= 0;
+    return {
+        _id: order._id,
+        orderId: order.orderId,
+        status: order.status,
+        payment: {
+            method: order.payment?.method,
+            status: order.payment?.status,
+            razorpayPaymentId: order.payment?.razorpayPaymentId,
+        },
+        pricing: {
+            subtotal: order.pricing?.subtotal ?? 0,
+            shipping: order.pricing?.shipping ?? 0,
+            discount: order.pricing?.discount ?? 0,
+            total: order.pricing?.total ?? 0,
+        },
+        shippingAddress: order.shippingAddress ? {
+            firstName: order.shippingAddress.firstName,
+            lastName: order.shippingAddress.lastName,
+            email: order.shippingAddress.email,
+            phone: order.shippingAddress.phone,
+        } : undefined,
+        isZeroPayable,
+        createdAt: order.createdAt,
+    };
 }
 
 
@@ -957,6 +1006,7 @@ const verifyPayment = asyncHandler(async (req, res) => {
                 outcome: "held",
                 message: `Order is on hold for review: ${order.fulfillmentHold.reason || "Review required"}`,
                 orderId: order.orderId,
+                order: buildCustomerOrderSummary(order),
             });
         }
         return res.status(200).json({
@@ -965,6 +1015,7 @@ const verifyPayment = asyncHandler(async (req, res) => {
             outcome: "paid",
             message: "Payment already verified",
             orderId: order.orderId,
+            order: buildCustomerOrderSummary(order),
         });
     }
     if (order.payment.status === "refunded") {
@@ -1038,6 +1089,7 @@ const verifyPayment = asyncHandler(async (req, res) => {
                     outcome: "paid",
                     message: "Payment verified successfully",
                     orderId: order.orderId,
+                    order: buildCustomerOrderSummary(claimed),
                 });
             }
 
@@ -1049,6 +1101,7 @@ const verifyPayment = asyncHandler(async (req, res) => {
                     outcome: "held",
                     message: `Order is on hold for review: ${cur.fulfillmentHold.reason || "Review required"}`,
                     orderId: order.orderId,
+                    order: buildCustomerOrderSummary(cur),
                 });
             }
             const st = cur?.payment?.status;
@@ -1058,6 +1111,7 @@ const verifyPayment = asyncHandler(async (req, res) => {
                 outcome: st === "paid" ? "paid" : "verification_pending",
                 message: st === "paid" ? "Payment verified successfully" : "Payment is being confirmed. This page can be safely reloaded in a moment.",
                 orderId: order.orderId,
+                order: buildCustomerOrderSummary(cur || order),
             });
         }
 
@@ -2374,5 +2428,6 @@ export const __test = {
     prepareCollection,
     CHECKOUT_COLLECTION_MODELS,
     buildCheckoutOrderResponse,
+    buildCustomerOrderSummary,
     decidePaymentReconciliationOutcome,
 };
