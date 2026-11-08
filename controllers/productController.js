@@ -133,7 +133,9 @@ const addProduct = async (req, res) => {
 };
 
 const getAllProducts = async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    if (typeof res.setHeader === "function") {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    }
     try {
         const { 
             search, q, category, color, material, 
@@ -302,7 +304,9 @@ const getAllProducts = async (req, res) => {
 };
 
 const getProductById = async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    if (typeof res.setHeader === "function") {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    }
     try {
         const { id } = req.params;
         const product = await productModal.findById(id).lean();
@@ -326,7 +330,9 @@ const getProductById = async (req, res) => {
 };
 
 const getProductBySku = async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    if (typeof res.setHeader === "function") {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    }
     try {
         const sku = decodeURIComponent(req.params.sku);
         // Escape the SKU so a path param can't inject a regex / ReDoS pattern.

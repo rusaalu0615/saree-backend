@@ -15,6 +15,7 @@ const {
     updateOrderStatus,
     cancelOrder,
     cancelUserOrder,
+    abandonCheckout,
     adminRefundOrder,
     adminPushToShiprocket,
     verifyPayment,
@@ -42,6 +43,7 @@ router.post("/track-public", trackOrderPublic);
 // Authenticated / Guest customer routes
 router.post("/", optionalProtect, createOrder);
 router.post("/verify-payment", optionalProtect, verifyPayment);
+router.post("/abandon-checkout", optionalProtect, abandonCheckout);
 router.get("/my-orders", protect, getUserOrders);
 router.get("/:id", protect, getOrderById);
 router.post("/:id/cancel", protect, cancelUserOrder);

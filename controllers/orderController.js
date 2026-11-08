@@ -870,12 +870,21 @@ function decidePaymentReconciliationOutcome({
     }
 
     if (rec.outcome === RZP_OUTCOME.NO_CAPTURED) {
-        if (order.status === "cancelled" || order.payment?.status === "failed") {
+        if (order.status === "cancelled" || order.cancellation?.status === "completed") {
             return {
                 decision: "respond",
                 status: order.payment?.status || "failed",
                 outcome: "terminal",
-                message: "This order has been cancelled or has expired.",
+                message: "This order has been cancelled.",
+                orderId: order.orderId,
+            };
+        }
+        if (order.reservation?.state === "released" || order.reservation?.state === "expired" || order.resourcesReleased || isExpired) {
+            return {
+                decision: "respond",
+                status: "failed",
+                outcome: "terminal",
+                message: "The payment window and inventory reservation for this order have expired.",
                 orderId: order.orderId,
             };
         }
@@ -885,24 +894,6 @@ function decidePaymentReconciliationOutcome({
                 status: order.payment?.status,
                 outcome: "held",
                 message: `Order is on hold for review: ${order.fulfillmentHold.reason || "Review required"}`,
-                orderId: order.orderId,
-            };
-        }
-        if (order.reservation?.state === "released" || order.resourcesReleased) {
-            return {
-                decision: "respond",
-                status: "failed",
-                outcome: "terminal",
-                message: "Inventory reservation for this order has expired.",
-                orderId: order.orderId,
-            };
-        }
-        if (isExpired) {
-            return {
-                decision: "respond",
-                status: "failed",
-                outcome: "terminal",
-                message: "Payment window for this order has expired.",
                 orderId: order.orderId,
             };
         }
@@ -1099,12 +1090,22 @@ const verifyPayment = asyncHandler(async (req, res) => {
 
     // 4. ORDER HAS NO GATEWAY ORDER ID (TASK 2 & TASK 4):
     // Check terminal/held conditions first:
-    if (order.status === "cancelled" || order.payment.status === "failed") {
+    if (order.status === "cancelled" || order.cancellation?.status === "completed") {
         return res.status(200).json({
             success: true,
             status: order.payment.status || "failed",
             outcome: "terminal",
-            message: "This order has been cancelled or has expired.",
+            message: "This order has been cancelled.",
+            orderId: order.orderId,
+        });
+    }
+    const isStep4TimeExpired = (order.reservation?.expiresAt && new Date(order.reservation.expiresAt).getTime() < Date.now());
+    if ((order.reservation?.state === "released" || order.reservation?.state === "expired" || order.resourcesReleased || isStep4TimeExpired) && !order.gatewayInit?.sentExternalCall) {
+        return res.status(200).json({
+            success: true,
+            status: "failed",
+            outcome: "terminal",
+            message: "The payment window and inventory reservation for this order have expired.",
             orderId: order.orderId,
         });
     }
@@ -1564,6 +1565,32 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
 // ---------------------------------------------------------------------------
 
 /** GET /api/order/my-orders — authenticated user's orders */
+function evaluateResumeEligibility(order) {
+    if (!order) return { canResumePayment: false, cannotResumeReason: "Order not found." };
+    const method = (order.payment?.method || "").toLowerCase();
+    const isOnline = method && method !== "cod";
+    if (!isOnline) {
+        return { canResumePayment: false, cannotResumeReason: "Only online payment orders can be resumed." };
+    }
+    if (order.payment?.status === "paid") {
+        return { canResumePayment: false, cannotResumeReason: "Payment has already been confirmed." };
+    }
+    if (order.status === "cancelled" || order.cancellation?.status === "completed") {
+        return { canResumePayment: false, cannotResumeReason: "This order has been cancelled." };
+    }
+    if (order.fulfillmentHold?.active) {
+        return { canResumePayment: false, cannotResumeReason: "This order is under manual review." };
+    }
+    const isExpired = order.reservation?.state === "released" ||
+                      order.reservation?.state === "expired" ||
+                      Boolean(order.resourcesReleased) ||
+                      (order.reservation?.expiresAt && new Date(order.reservation.expiresAt).getTime() < Date.now());
+    if (isExpired) {
+        return { canResumePayment: false, cannotResumeReason: "Payment window has expired." };
+    }
+    return { canResumePayment: true, cannotResumeReason: null };
+}
+
 const getUserOrders = asyncHandler(async (req, res) => {
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 50);
@@ -1593,6 +1620,9 @@ const getUserOrders = asyncHandler(async (req, res) => {
         o.cannotCancelReason = eligibility.cannotCancelReason;
         o.cancellationSummary = buildCustomerCancellationSummary(o);
         o.refundSummary = buildCustomerRefundSummary(o);
+        const resumeInfo = evaluateResumeEligibility(o);
+        o.canResumePayment = resumeInfo.canResumePayment;
+        o.cannotResumeReason = resumeInfo.cannotResumeReason;
         return o;
     });
 
@@ -1624,6 +1654,9 @@ const getOrderById = asyncHandler(async (req, res) => {
     o.cannotCancelReason = eligibility.cannotCancelReason;
     o.cancellationSummary = buildCustomerCancellationSummary(o);
     o.refundSummary = buildCustomerRefundSummary(o);
+    const resumeInfo = evaluateResumeEligibility(o);
+    o.canResumePayment = resumeInfo.canResumePayment;
+    o.cannotResumeReason = resumeInfo.cannotResumeReason;
 
     res.status(200).json({ success: true, order: o });
 });
@@ -2230,6 +2263,65 @@ const handleShiprocketWebhook = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, processed: true, orderId: order.orderId });
 });
 
+/**
+ * POST /api/order/abandon-checkout
+ * Explicitly cancel and release an unpaid checkout attempt cleanly.
+ */
+const abandonCheckout = asyncHandler(async (req, res) => {
+    const { orderId, checkoutToken, reason } = req.body || {};
+    if (!orderId || !isPlainString(orderId)) {
+        throw new AppError("A valid order ID is required.", 400);
+    }
+
+    const order = await resolveOwnedOrder(orderId, req);
+
+    if (order.status === "cancelled" || order.cancellation?.status === "completed") {
+        return res.status(200).json({
+            success: true,
+            alreadyCancelled: true,
+            orderId: order.orderId,
+            message: "Order has already been cancelled and inventory released.",
+        });
+    }
+
+    if (order.payment?.method === "cod" || order.payment?.status === "paid") {
+        throw new AppError("Cannot abandon a paid or Cash-on-Delivery order. Please use standard order cancellation.", 400);
+    }
+
+    // Safety gateway check: if gateway has captured payment, refuse cancellation
+    if (razorpayInstance && order.payment?.razorpayOrderId) {
+        try {
+            const rec = await reconcileGatewayPayment(razorpayInstance, order.payment.razorpayOrderId, {
+                expectedAmountPaise: toPaise(order.pricing.total),
+            });
+            if (rec.outcome === RZP_OUTCOME.CAPTURED_VALID || rec.outcome === RZP_OUTCOME.IN_PROGRESS) {
+                return res.status(409).json({
+                    success: false,
+                    code: "PAYMENT_CAPTURED",
+                    message: "A payment was captured or is in progress for this order. It cannot be cancelled as unpaid.",
+                    orderId: order.orderId,
+                });
+            }
+        } catch (gwErr) {
+            console.warn(`[Abandon] Gateway check failed for ${order.orderId}:`, gwErr.message);
+        }
+    }
+
+    const cancelReason = (reason && String(reason).trim().slice(0, 200)) || "Checkout cancelled by customer";
+    const result = await processOrderCancellation(order._id, {
+        reason: cancelReason,
+        cancelledBy: "customer",
+        actorId: req.user?._id || undefined,
+    });
+
+    res.status(200).json({
+        success: true,
+        finalized: result.finalized,
+        orderId: order.orderId,
+        message: "Order cancelled and reserved inventory restored to shop.",
+    });
+});
+
 export default {
     createOrder,
     getUserOrders,
@@ -2240,6 +2332,7 @@ export default {
     updateOrderStatus,
     cancelOrder,
     cancelUserOrder,
+    abandonCheckout,
     adminRefundOrder,
     adminPushToShiprocket,
 
