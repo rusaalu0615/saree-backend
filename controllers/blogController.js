@@ -1,5 +1,5 @@
 import blogModal from "../models/blogModal.js";
-import { uploadImage, deleteFromR2 } from "../utils/r2Upload.js";
+import { sanitizeBlogHtml } from "../utils/sanitizeHtml.js";
 
 const addBlog = async (req, res) => {
     try {
@@ -21,7 +21,7 @@ const addBlog = async (req, res) => {
 
         const blog = new blogModal({
             title: title.trim(),
-            description: description.trim(),
+            description: sanitizeBlogHtml(description.trim()),
             image,
         });
 
@@ -94,7 +94,7 @@ const updateBlog = async (req, res) => {
 
         const updateData = {};
         if (title) updateData.title = title.trim();
-        if (description) updateData.description = description.trim();
+        if (description) updateData.description = sanitizeBlogHtml(description.trim());
         
         // Handle image update from file OR body URL
         if (imageFile) {
