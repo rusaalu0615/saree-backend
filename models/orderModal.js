@@ -228,6 +228,17 @@ const orderSchema = new mongoose.Schema({
         status: String,
         trackingUrl: String,
     },
+    // Canonical logistics state (RTO-safe): webhook snapshots land here and
+    // never force RTO into customer-facing order.status until explicit
+    // RTO automation is added.
+    delivery: {
+        status: { type: String, default: "pending" },
+        rawStatus: String,
+        rawStatusCode: String,
+        lastEventAt: Date,
+        expectedDeliveryAt: Date,
+        lastSyncedAt: Date,
+    },
     status: {
         type: String,
         enum: [

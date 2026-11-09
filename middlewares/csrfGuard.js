@@ -16,7 +16,7 @@ const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 // Endpoints that third parties (payment gateways) POST to directly. They cannot
 // carry our header, so they are authenticated by HMAC signature instead.
-const EXEMPT_SUFFIXES = ["/api/order/webhook"];
+const EXEMPT_SUFFIXES = ["/api/order/webhook", "/api/order/carrier-events"];
 
 export const csrfGuard = (req, res, next) => {
     if (!STATE_CHANGING.has(req.method)) return next();

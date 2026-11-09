@@ -23,6 +23,7 @@
  */
 
 // Forward-only progression used by the status sync. Higher = further along.
+// RTO lives in delivery.status (logistics), never forced into order.status.
 export const STATUS_RANK = {
     placed: 0,
     confirmed: 1,
@@ -31,6 +32,14 @@ export const STATUS_RANK = {
     in_transit: 4,
     out_for_delivery: 5,
     delivered: 6,
+    undelivered: 6,
+    rto_initiated: 7,
+    rto_in_transit: 8,
+    rto_out_for_delivery: 9,
+    rto_delivered: 10,
+    lost: 6,
+    damaged: 6,
+    cancelled: 6,
 };
 
 // Two DISTINCT Shiprocket code spaces exist and must never be conflated:
@@ -75,9 +84,12 @@ function classifyText(raw) {
 
     // Terminal-negative states are left to the admin RTO/undelivered workflow —
     // a courier string must never auto-regress or hijack our status.
-    if (s.includes("undeliver") || s.includes("rto") || s.includes("cancelled") || s.includes("canceled") || s.includes("failed")) {
-        return null;
-    }
+    // RTO / undelivered are logistics states, never customer Delivered.
+    if (s.includes("rto delivered") || s.includes("returned to seller")) return "rto_delivered";
+    if (s.includes("rto out for delivery")) return "rto_out_for_delivery";
+    if (s.includes("rto in transit")) return "rto_in_transit";
+    if (s.includes("rto") || s.includes("return initiated")) return "rto_initiated";
+    if (s.includes("undeliver") || s.includes("cancelled") || s.includes("canceled") || s.includes("failed")) return "undelivered";
 
     // SPECIFIC first — do NOT use a generic "out for" match.
     if (s === "out for delivery" || s.includes("out for delivery") || s.includes("ofd")) return "out_for_delivery";
@@ -156,6 +168,10 @@ function collectActivities(src) {
  */
 export function normalizeTrackingResult(raw) {
     if (!raw || typeof raw !== "object") return null;
+    // Idempotent: callers (webhook vs worker) pass RAW payloads only. If a
+    // canonical object already carries mappedStatus, return a copy untouched
+    // so re-normalizing never re-classifies or regresses state.
+    if (raw.__canonical && raw.mappedStatus !== undefined) return { ...raw };
 
     // Unwrap possible `data` and `shipments[0]` layers without losing tracking_data.
     let base = raw.data && typeof raw.data === "object" ? raw.data : raw;
@@ -213,6 +229,7 @@ export function normalizeTrackingResult(raw) {
         }));
 
     return {
+        __canonical: true,
         awb: String(src.awb_code || src.awb || "").trim() || null,
         shipmentId: src.shipment_id || src.id || null,
         courierName: src.courier_name || src.courierName || null,

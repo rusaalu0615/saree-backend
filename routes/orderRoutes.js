@@ -2,6 +2,7 @@ import express from "express";
 import orderController from "../controllers/orderController.js";
 import { protect, optionalProtect } from "../middlewares/authMiddleware.js";
 import { adminProtect } from "../middlewares/adminMiddleware.js";
+import verifyCarrierWebhook from "../middlewares/verifyCarrierWebhook.js";
 
 const router = express.Router();
 
@@ -32,7 +33,7 @@ const {
 router.post("/webhook", handleRazorpayWebhook);
 
 // Shiprocket tracking webhook
-router.post("/shiprocket-webhook", handleShiprocketWebhook);
+router.post("/carrier-events", verifyCarrierWebhook, handleShiprocketWebhook);
 
 // Public route — check PIN code delivery & COD serviceability
 router.get("/check-serviceability", checkDeliveryServiceability);
