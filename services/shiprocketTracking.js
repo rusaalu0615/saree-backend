@@ -56,23 +56,42 @@ export const STATUS_RANK = {
 const TRACK_STATUS_CODE = {
     6: "Shipped",
     7: "Delivered",
+    9: "RTO Initiated",
+    10: "RTO Delivered",
     17: "Out For Delivery",
     18: "In Transit",
     19: "Out For Pickup",
+    21: "Undelivered",
+    38: "Reached Destination Hub",
+    41: "RTO Out For Delivery",
+    42: "Picked Up",
+    46: "RTO In Transit",
 };
 
 // (A) order/shipment-level codes. Conservative — only the codes with a stable
 // documented meaning that map to a NON-terminal progression. Negative/terminal
 // courier states (RTO, undelivered, cancelled) are deliberately absent so they
 // never auto-advance the order; they are left to the admin workflow.
+// ORDER space now mirrors the same official shipment codes above (webhook
+// field shipment_status_id uses these numbers). Old 6=Delivered was wrong:
+// official 6=Shipped, 7=Delivered. Pre-pickup order codes kept for compat.
 const ORDER_STATUS_CODE = {
     1: "New",
     2: "Pickup Generated",
     3: "Picked Up",
-    4: "In Transit",
-    5: "Out For Delivery",
-    6: "Delivered",
+    6: "Shipped",
+    7: "Delivered",
+    9: "RTO Initiated",
+    10: "RTO Delivered",
     14: "Shipped",
+    17: "Out For Delivery",
+    18: "In Transit",
+    19: "Out For Pickup",
+    21: "Undelivered",
+    38: "Reached Destination Hub",
+    41: "RTO Out For Delivery",
+    42: "Picked Up",
+    46: "RTO In Transit",
 };
 
 // Text → canonical status. Order matters: the SPECIFIC phrases are tested
@@ -228,8 +247,12 @@ export function normalizeTrackingResult(raw) {
             location: a.location || a.city || a.from || null,
         }));
 
+    const eventTime = src.current_timestamp || src.date || src.shipment_track_date || firstTrack?.date || firstTrack?.shipment_track_date || null;
+    const etdVal = src.etd || src.expected_date || src.edd || src.delivery_date || null;
     return {
         __canonical: true,
+        eventTime,
+        etd: etdVal,
         awb: String(src.awb_code || src.awb || "").trim() || null,
         shipmentId: src.shipment_id || src.id || null,
         courierName: src.courier_name || src.courierName || null,
@@ -239,7 +262,6 @@ export function normalizeTrackingResult(raw) {
         shipmentStatus: label,
         currentStatus,
         mappedStatus,
-        etd: src.etd || src.expected_date || src.edd || src.delivery_date || null,
         trackUrl: src.track_url || src.trackingUrl || null,
         activities,
     };
