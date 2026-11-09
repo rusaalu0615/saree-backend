@@ -1544,14 +1544,15 @@ export { normalizeTrackingResult, sanitizeTrackingForPublic, mapShipmentStatus, 
 export async function syncOrderFromShipment(orderDoc, trackingPayload) {
     try {
         if (!trackingPayload || ["cancelled", "returned"].includes(orderDoc.status) || ["requested", "completed"].includes(orderDoc.cancellation?.status)) return;
-        const n = normalizeTrackingResult(trackingPayload);
+        // Normalize exactly once: raw -> canonical, canonical -> reuse.
+        const normalized = trackingPayload?.__canonical === true ? trackingPayload : normalizeTrackingResult(trackingPayload);
+        if (!normalized) return;
+        const n = normalized;
         const srStatus = n?.currentStatus || n?.shipmentStatus;
         if (!srStatus) return;
 
         // Already-canonical payloads (from webhook fast path) skip re-normalize.
-        const alreadyCanonical = trackingPayload?.__canonical === true;
-        const nCanonical = alreadyCanonical ? trackingPayload : null;
-        const mapped = alreadyCanonical ? nCanonical.mappedStatus : mapShipmentStatus(srStatus);
+        const mapped = normalized.mappedStatus;
         // Future RTO/undelivered/logistics states are logistics-only: they must
         // never move customer order.status to delivered. Track them in
         // delivery.status instead. For now the webhook only persists raw
@@ -1560,9 +1561,13 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             orderDoc.delivery = orderDoc.delivery || {};
             orderDoc.delivery.status = mapped;
             orderDoc.delivery.rawStatus = String(srStatus);
+            if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
+            if (normalized.eventTime) { const d = new Date(normalized.eventTime); if (!Number.isNaN(d.getTime())) orderDoc.delivery.lastEventAt = d; }
+            if (normalized.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
             orderDoc.delivery.lastSyncedAt = new Date();
-            if (nCanonical?.awb) orderDoc.shiprocket.awbCode = nCanonical.awb;
-            if (nCanonical?.courierName) orderDoc.shiprocket.courierName = nCanonical.courierName;
+            if (normalized.awb) orderDoc.shiprocket.awbCode = normalized.awb;
+            if (normalized.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
+            if (normalized.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
             await orderDoc.save();
             console.log(`[Sync] Order ${orderDoc.orderId} logistics '${mapped}' (RTO separate)`);
             return;
@@ -1588,12 +1593,12 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
         orderDoc.delivery = orderDoc.delivery || {};
         if (mapped && !mapped.startsWith("rto_")) orderDoc.delivery.status = mapped;
         orderDoc.delivery.rawStatus = String(srStatus);
-        orderDoc.delivery.rawStatusCode = String(nCanonical?.rawStatusCode ?? "");
-        const eventTime = (alreadyCanonical && nCanonical?.etd) || nCanonical?.etd;
-        if (eventTime) orderDoc.delivery.lastEventAt = new Date(eventTime);
-        if (nCanonical?.awb) orderDoc.shiprocket.awbCode = nCanonical.awb;
-        if (nCanonical?.courierName) orderDoc.shiprocket.courierName = nCanonical.courierName;
-        if (nCanonical?.trackUrl) orderDoc.shiprocket.trackingUrl = nCanonical.trackUrl;
+        if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
+        if (normalized.eventTime) { const d = new Date(normalized.eventTime); if (!Number.isNaN(d.getTime())) orderDoc.delivery.lastEventAt = d; }
+        if (normalized.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
+        if (normalized.awb) orderDoc.shiprocket.awbCode = normalized.awb;
+        if (normalized.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
+        if (normalized.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
         orderDoc.delivery.lastSyncedAt = new Date();
 
         if (mapped && newRank > curRank) {
