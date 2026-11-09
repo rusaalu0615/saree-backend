@@ -1587,9 +1587,21 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
 
         // Same-status refresh: persist newer metadata, skip transition side-effects.
         if (orderDoc.shiprocket.status === srStatus) {
+            // Metadata refresh is independent of chronology: persist ETD/URL/AWB
+            // always; advance lastEventAt only when event time is newer.
             const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
-            const nextEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : 0;
-            if (nextEvent <= prevEvent) return;
+            const nextEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : Number.NaN;
+            orderDoc.delivery = orderDoc.delivery || {};
+            if (Number.isFinite(nextEvent) && nextEvent > prevEvent) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
+            if (normalized?.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
+            orderDoc.delivery.lastSyncedAt = new Date();
+            if (normalized?.awb) orderDoc.shiprocket.awbCode = normalized.awb;
+            if (normalized?.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
+            if (normalized?.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
+            await orderDoc.save();
+            console.log(`[Tracking] ${orderDoc.orderId} metadata refreshed for same status`);
+            return;
+        }
             orderDoc.delivery = orderDoc.delivery || {};
             if (normalized?.eventTime) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
             if (normalized?.etd) orderDoc.delivery.expectedDeliveryAt = new Date(normalized.etd);
