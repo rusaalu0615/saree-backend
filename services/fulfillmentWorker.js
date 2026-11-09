@@ -419,7 +419,36 @@ async function stageGeneratePickup(order, claimToken) {
         throw Object.assign(new Error("lease_lost_before_pickup"), { code: "lease" });
     }
 
-    const pickup = await shiprocket.generatePickup(order.shiprocket.shipmentId);
+    const reconcilePickup = async () => {
+        try {
+            const detail = await shiprocket.getShipmentDetail(order.shiprocket.shipmentId);
+            console.log(`[Fulfillment] ${order.orderId} pickup reconciling shipment ${order.shiprocket.shipmentId}`);
+            if (detail?.confirmed) {
+                console.log(`[Fulfillment] ${order.orderId} pickup confirmed by Shiprocket`);
+                await ownedUpdate(order._id, claimToken, { "fulfillment.stage": "pickup_requested", "fulfillment.stageConfirmedAt": new Date(), "fulfillment.pickupScheduledFor": detail.pickupGeneratedAt || detail.pickupScheduledAt || new Date(), "fulfillment.lastError": null, "fulfillment.nextAttemptAt": null }, { timeline: { status: "Pickup Scheduled", description: "Courier pickup confirmed via Shiprocket reconciliation", date: new Date() } });
+                await stageComplete(order, claimToken);
+                return true;
+            }
+            console.log(`[Fulfillment] ${order.orderId} pickup still unconfirmed; retry scheduled`);
+            return false;
+        } catch (e) {
+            console.log(`[Fulfillment] ${order.orderId} shipment reconcile failed`);
+            return false;
+        }
+    };
+    let pickup;
+    try {
+        pickup = await shiprocket.generatePickup(order.shiprocket.shipmentId);
+    } catch (err) {
+        const msg = String(err?.message || err);
+        if (/already in pickup queue/i.test(msg)) {
+            console.log(`[Fulfillment] ${order.orderId} pickup already queued; reconciling shipment`);
+            if (await reconcilePickup()) return Order.findById(order._id);
+            await ownedUpdate(order._id, claimToken, { "fulfillment.stage": "pickup_pending", "fulfillment.lastError": msg.slice(0, 300), "fulfillment.nextAttemptAt": backoffDate(order.fulfillment?.attempts) }, { timeline: { status: "Pickup Pending", description: `Pickup queued but unconfirmed — will retry`, date: new Date() } });
+            return Order.findById(order._id);
+        }
+        throw err;
+    }
     const rejected = pickup?.data?.failed_pickup_messages?.length || pickup?.data?.error?.message;
     const scheduledDate =
         pickup?.data?.pickup_dates?.[0]?.pickup_origin_expected_date ||
@@ -431,6 +460,7 @@ async function stageGeneratePickup(order, claimToken) {
     const confirmed = !rejected && scheduledDate !== null;
 
     if (rejected) {
+        if (/already in pickup queue/i.test(String(rejected))) { console.log(`[Fulfillment] ${order.orderId} pickup already queued (rejected field); reconciling shipment`); if (await reconcilePickup()) return Order.findById(order._id); }
         await ownedUpdate(
             order._id,
             claimToken,
@@ -441,6 +471,7 @@ async function stageGeneratePickup(order, claimToken) {
     }
 
     if (!confirmed) {
+        console.log(`[Fulfillment] ${order.orderId} pickup accepted without date; reconciling shipment`); if (await reconcilePickup()) return Order.findById(order._id);
         // Ambiguous success (accepted but no scheduled date) â€” retry the pickup;
         // this is NOT a dispatch and must not mark stock return_pending.
         await ownedUpdate(

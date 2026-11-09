@@ -9,12 +9,15 @@ import shiprocket from "./shiprocket.js";
 import { syncOrderFromShipment } from "../controllers/orderController.js";
 
 export async function runTrackingSweep(batchLimit = 15) {
+    // Recovery: confirmed orders WITH Shiprocket evidence (AWB/shipment) were
+    // fulfilled but webhook was missed — they must be polled. Confirmed with
+    // no identifiers stays untouched.
     const activeOrders = await Order.find({
         $or: [
-            { "shiprocket.awbCode": { $exists: true, $ne: null } },
+            { "shiprocket.awbCode": { $exists: true, $ne: null, $nin: ["", null, undefined] } },
             { "shiprocket.orderId": { $exists: true, $ne: null } },
         ],
-        status: { $in: ["processing", "shipped", "in_transit", "out_for_delivery"] },
+        status: { $in: ["processing", "shipped", "in_transit", "out_for_delivery", "confirmed"] },
         "cancellation.status": { $nin: ["requested", "completed"] },
         "fulfillmentHold.active": { $ne: true },
     })
