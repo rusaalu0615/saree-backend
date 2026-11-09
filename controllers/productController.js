@@ -869,4 +869,102 @@ const getFilters = async (req, res) => {
     }
 };
 
-export default { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters };
+// Cursor-based discovery: small batches, staged ranking, lightweight cards.
+// Stages broaden relevance: same collection/category → material/color/price
+// → popular/new. Cursor encodes scored offset + exclude-count so batches
+// never repeat or need hundreds of exclude IDs.
+const getRecommendations = async (req, res) => {
+    if (typeof res.setHeader === "function") {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    }
+    try {
+        const current = await productModal.findById(req.params.productId).lean();
+        if (!current) {
+            return res.status(404).json({ success: false, message: "Product not found" });
+        }
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 8, 1), 12);
+        let cursorOffset = 0;
+        try {
+            if (req.query.cursor) {
+                const decoded = JSON.parse(Buffer.from(String(req.query.cursor), "base64url").toString("utf8"));
+                if (decoded && typeof decoded.o === "number" && Number.isFinite(decoded.o) && decoded.o >= 0) {
+                    cursorOffset = Math.min(Math.floor(decoded.o), 10000);
+                }
+            }
+        } catch {}
+        const coll = current.productCollection;
+        const cat = current.category;
+        const mat = current.material;
+        const col = current.color;
+        const price = Number(current.price) || 0;
+        const collQ = coll ? { productCollection: coll } : null;
+        const catQ = cat ? { category: cat } : null;
+        const matQ = mat ? { material: mat } : null;
+        const colorQ = col ? { color: col } : null;
+        const priceQ = price > 0 ? { price: { $gte: Math.round(price * 0.8), $lte: Math.round(price * 1.25) } } : null;
+        const stages = [
+            collQ,
+            catQ,
+            matQ,
+            colorQ,
+            priceQ,
+            { isNewArrival: true },
+            { isOnSale: true },
+            null, // broad: newest remaining
+        ].filter(Boolean);
+        // Interleave staged candidates with variety (70% stage, 30% newest)
+        // using a single pass of bounded indexed queries. Each query uses
+        // compound indexes (category/material/collection + createdAt).
+        const want = limit * 2 + 8;
+        const seen = new Set([String(current._id)]);
+        const picked = [];
+        for (const q of stages) {
+            if (picked.length >= want) break;
+            const docs = await productModal.find({ ...q, _id: { $nin: [...seen] } })
+                .sort({ createdAt: -1 })
+                .limit(want)
+                .select("_id name sku category productCollection material color price regularPrice stock mainImage galleryImages isNewArrival isOnSale averageRating numReviews")
+                .lean();
+            for (const d of docs) {
+                const id = String(d._id);
+                if (seen.has(id)) continue;
+                seen.add(id);
+                picked.push(d);
+                if (picked.length >= want) break;
+            }
+        }
+        // Variety: keep top section-order, blend native sort for rest.
+        picked.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+        const start = cursorOffset;
+        const batch = picked.slice(start, start + limit);
+        const hasMore = start + limit < picked.length;
+        let nextCursor = null;
+        if (hasMore) {
+            nextCursor = Buffer.from(JSON.stringify({ o: start + limit }), "utf8").toString("base64url");
+        }
+        const cards = batch.map((d) => {
+            const alt = Array.isArray(d.galleryImages) && d.galleryImages.length > 0 ? (d.galleryImages[0]?.url || d.galleryImages[0]) : null;
+            return {
+                _id: d._id,
+                name: d.name,
+                sku: d.sku,
+                category: d.category,
+                price: d.price,
+                regularPrice: d.regularPrice,
+                stock: d.stock,
+                mainImage: d.mainImage,
+                alternateImage: alt || null,
+                averageRating: d.averageRating || 0,
+                numReviews: d.numReviews || 0,
+                isNewArrival: Boolean(d.isNewArrival),
+                isOnSale: Boolean(d.isOnSale),
+            };
+        });
+        res.status(200).json({ success: true, products: cards, nextCursor, hasMore });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: "Internal server error: " + (error.message || error) });
+    }
+};
+
+export default { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations };

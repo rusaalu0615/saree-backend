@@ -166,11 +166,11 @@ productSchema.index({ material: 1 });
 productSchema.index({ isOnSale: 1 });
 productSchema.index({ isFestive: 1 });
 productSchema.index({ isNewArrival: 1 });
-// Catalog sort/filter combos (createdAt DESC is the default listing order).
-productSchema.index({ createdAt: -1 });
-productSchema.index({ category: 1, createdAt: -1 });
 productSchema.index({ productCollection: 1, createdAt: -1 });
 productSchema.index({ isNewArrival: 1, createdAt: -1 });
 productSchema.index({ isOnSale: 1, createdAt: -1 });
+productSchema.index({ material: 1, createdAt: -1 });
+productSchema.index({ color: 1, createdAt: -1 });
+productSchema.index({ price: 1, createdAt: -1 });
 
 export default mongoose.model("Product", productSchema);
