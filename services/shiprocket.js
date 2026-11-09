@@ -379,10 +379,10 @@ export function normalizeShipmentDetail(raw) {
     const tracking = data.tracking_data?.shipment_track?.[0] ?? null;
     const pickupGeneratedAt = shipment.pickupGeneratedDate ?? shipment.pickup_generated_date ?? shipment.pickup_scheduled_date ?? tracking?.pickupGeneratedDate ?? null;
     const status = shipment.status ?? tracking?.status ?? null;
-    const statusCode = shipment.status_id ?? shipment.status ?? tracking?.status_code ?? null;
+    const statusCode = shipment.status_code ?? shipment.status_id ?? shipment.status ?? tracking?.status_code ?? null;
     const awb = shipment.awb_code ?? shipment.awb ?? null;
     const courier = shipment.courier_name ?? shipment.courierName ?? data.courier_name ?? null;
-    const confirmed = Boolean(pickupGeneratedAt) || [2, 3].includes(Number(status)) || Number(statusCode) === 42;
+    const confirmed = Boolean(pickupGeneratedAt) || Number(status) === 3 || Number(status) === 42 || Number(statusCode) === 3 || Number(statusCode) === 42 || Number(shipment.status_code) === 42 || Number(shipment.status_id) === 42;
     return { shipmentId: shipment.id ?? shipment.shipment_id ?? null, shiprocketOrderId: shipment.order_id ?? shipment.sr_order_id ?? null, status, statusCode, awb, courier, pickupGeneratedAt, pickupScheduledAt: pickupGeneratedAt, confirmed };
 }
 

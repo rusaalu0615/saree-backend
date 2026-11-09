@@ -1585,8 +1585,22 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             orderDoc.reservation.state = "return_pending";
         }
 
-        // If tracking status has not changed, nothing more to do (dispatch repair already handled above).
-        if (orderDoc.shiprocket.status === srStatus) return;
+        // Same-status refresh: persist newer metadata, skip transition side-effects.
+        if (orderDoc.shiprocket.status === srStatus) {
+            const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
+            const nextEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : 0;
+            if (nextEvent <= prevEvent) return;
+            orderDoc.delivery = orderDoc.delivery || {};
+            if (normalized?.eventTime) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
+            if (normalized?.etd) orderDoc.delivery.expectedDeliveryAt = new Date(normalized.etd);
+            orderDoc.delivery.lastSyncedAt = new Date();
+            if (normalized?.awb) orderDoc.shiprocket.awbCode = normalized.awb;
+            if (normalized?.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
+            if (normalized?.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
+            await orderDoc.save();
+            console.log(`[Tracking] ${orderDoc.orderId} metadata refreshed for same status`);
+            return;
+        }
 
         orderDoc.shiprocket.status = srStatus;
         // Tracking-only fields (idempotent): keep freshest provider snapshot.

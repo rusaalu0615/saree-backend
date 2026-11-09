@@ -15,6 +15,7 @@ export async function runTrackingSweep(batchLimit = 15) {
     const activeOrders = await Order.find({
         $or: [
             { "shiprocket.awbCode": { $exists: true, $ne: null, $nin: ["", null, undefined] } },
+            { "shiprocket.shipmentId": { $exists: true, $ne: null } },
             { "shiprocket.orderId": { $exists: true, $ne: null } },
         ],
         status: { $in: ["processing", "shipped", "in_transit", "out_for_delivery", "confirmed"] },
