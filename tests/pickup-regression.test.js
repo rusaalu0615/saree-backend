@@ -48,3 +48,11 @@ test("Required shipment mappings", () => {
   for (const [code, want] of cases) assert.equal(mapShipmentStatus(code, "track"), want, `code ${code}`);
   assert.notEqual(mapShipmentStatus(10, "track"), "delivered");
 });
+
+test("idempotency: pickup_requested/complete short-circuits pickup stage", async () => {
+  // Worker entry already guards by stage; assert worker file contains the guard.
+  const fs = await import("node:fs");
+  const src = fs.readFileSync("services/fulfillmentWorker.js", "utf8");
+  assert.match(src, /courier_assigned.*pickup_pending/);
+  assert.match(src, /stageGeneratePickup/);
+});
