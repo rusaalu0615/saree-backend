@@ -1603,21 +1603,6 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             return;
         }
             orderDoc.delivery = orderDoc.delivery || {};
-            if (normalized?.eventTime) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
-            if (normalized?.etd) orderDoc.delivery.expectedDeliveryAt = new Date(normalized.etd);
-            orderDoc.delivery.lastSyncedAt = new Date();
-            if (normalized?.awb) orderDoc.shiprocket.awbCode = normalized.awb;
-            if (normalized?.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
-            if (normalized?.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
-            await orderDoc.save();
-            console.log(`[Tracking] ${orderDoc.orderId} metadata refreshed for same status`);
-            return;
-        }
-
-        orderDoc.shiprocket.status = srStatus;
-        // Tracking-only fields (idempotent): keep freshest provider snapshot.
-        orderDoc.delivery = orderDoc.delivery || {};
-        if (mapped && !mapped.startsWith("rto_")) orderDoc.delivery.status = mapped;
         orderDoc.delivery.rawStatus = String(srStatus);
         if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
         if (normalized.eventTime) { const d = new Date(normalized.eventTime); if (!Number.isNaN(d.getTime())) orderDoc.delivery.lastEventAt = d; }
