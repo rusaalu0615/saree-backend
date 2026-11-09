@@ -6,11 +6,12 @@
  */
 import Order from "../models/orderModal.js";
 import shiprocket from "./shiprocket.js";
+import { mapShipmentStatus } from "./shiprocketTracking.js";
 import { syncOrderFromShipment } from "../controllers/orderController.js";
 
 export async function runTrackingSweep(batchLimit = 15) {
     // Recovery: confirmed orders WITH Shiprocket evidence (AWB/shipment) were
-    // fulfilled but webhook was missed — they must be polled. Confirmed with
+    // fulfilled but webhook was missed â€” they must be polled. Confirmed with
     // no identifiers stays untouched.
     const activeOrders = await Order.find({
         $or: [
@@ -31,6 +32,27 @@ export async function runTrackingSweep(batchLimit = 15) {
             let tracking = null;
             if (order.shiprocket?.awbCode) {
                 tracking = await shiprocket.trackByAWB(order.shiprocket.awbCode);
+            } else if (order.shiprocket?.shipmentId) {
+                const detail = await shiprocket.getShipmentDetail(order.shiprocket.shipmentId);
+                if (detail) {
+                    const mappedStatus = detail.statusCode != null
+                        ? mapShipmentStatus(detail.statusCode, "order")
+                        : (detail.status ? mapShipmentStatus(detail.status, "order") : null);
+                    tracking = {
+                        __canonical: true,
+                        eventTime: detail.pickupGeneratedAt || detail.pickupScheduledAt || null,
+                        etd: null,
+                        awb: detail.awb || null,
+                        shipmentId: detail.shipmentId || order.shiprocket.shipmentId,
+                        courierName: detail.courier || null,
+                        rawStatus: detail.statusCode ?? detail.status ?? null,
+                        shipmentStatus: detail.status || null,
+                        currentStatus: detail.status || null,
+                        mappedStatus,
+                        trackUrl: null,
+                        activities: [],
+                    };
+                }
             } else if (order.shiprocket?.orderId) {
                 tracking = await shiprocket.trackByShiprocketOrderId(order.shiprocket.orderId);
             }
@@ -49,4 +71,3 @@ export async function runTrackingSweep(batchLimit = 15) {
 export default {
     runTrackingSweep,
 };
-

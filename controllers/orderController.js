@@ -1559,12 +1559,15 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
         // tracking (no refund/stock/email automation).
         if (mapped && (mapped.startsWith("rto_") || mapped === "undelivered" || mapped === "lost" || mapped === "damaged" || mapped === "cancelled")) {
             // Chronology: never advance lastEventAt backward; RTO never moves backward.
-            const RTO_RANK = { undelivered: 1, rto_initiated: 2, rto_in_transit: 3, rto_out_for_delivery: 4, rto_delivered: 5, lost: 3, damaged: 3, cancelled: 3 };
+            const RTO_RANK = { undelivered: 1, rto_initiated: 2, rto_in_transit: 3, rto_out_for_delivery: 4, rto_delivered: 5 };
             const existingRank = RTO_RANK[orderDoc.delivery?.status] ?? -1;
             const incomingRank = RTO_RANK[mapped] ?? -1;
             const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
             const incomingEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : 0;
-            if (incomingRank < existingRank) { console.log(`[Sync] ${orderDoc.orderId} stale RTO/logistics event ignored`); return; }
+            if (existingRank !== -1 && incomingRank !== -1 && incomingRank < existingRank) {
+                console.log(`[Sync] ${orderDoc.orderId} stale RTO/logistics event ignored`);
+                return;
+            }
             orderDoc.delivery = orderDoc.delivery || {};
             orderDoc.delivery.status = mapped;
             orderDoc.delivery.rawStatus = String(srStatus);
@@ -1609,10 +1612,13 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             console.log(`[Tracking] ${orderDoc.orderId} metadata refreshed for same status`);
             return;
         }
-            orderDoc.delivery = orderDoc.delivery || {};
+        orderDoc.shiprocket.status = srStatus;
+        orderDoc.delivery = orderDoc.delivery || {};
         orderDoc.delivery.rawStatus = String(srStatus);
         if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
-        if (normalized.eventTime) { const d = new Date(normalized.eventTime); if (!Number.isNaN(d.getTime())) orderDoc.delivery.lastEventAt = d; }
+        const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
+        const incomingEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : 0;
+        if (Number.isFinite(incomingEvent) && incomingEvent > prevEvent) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
         if (normalized.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
         if (normalized.awb) orderDoc.shiprocket.awbCode = normalized.awb;
         if (normalized.courierName) orderDoc.shiprocket.courierName = normalized.courierName;

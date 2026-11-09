@@ -255,15 +255,15 @@ test("refundOutcome classifies every documented gateway status conservatively", 
 // Shiprocket status mapping — forward-only, numeric codes, terminal-negative
 // left to admin, and "Out For Pickup" DISTINCT from "Out For Delivery".
 // ---------------------------------------------------------------------------
-test("mapShipmentStatus maps progress and refuses to regress on negatives", () => {
+test("mapShipmentStatus maps progress and handles logistics/RTO states", () => {
     assert.equal(mapShipmentStatus("Delivered"), "delivered");
     assert.equal(mapShipmentStatus("Out for Delivery"), "out_for_delivery");
     assert.equal(mapShipmentStatus("In Transit"), "in_transit");
     assert.equal(mapShipmentStatus("Shipped"), "shipped");
-    // Negative/terminal courier text must NEVER hijack our status:
-    assert.equal(mapShipmentStatus("RTO Initiated"), null);
-    assert.equal(mapShipmentStatus("Undelivered"), null);
-    assert.equal(mapShipmentStatus("Cancelled"), null);
+    // Logistics & RTO courier text maps to separate logistics statuses (never customer Delivered):
+    assert.equal(mapShipmentStatus("RTO Initiated"), "rto_initiated");
+    assert.equal(mapShipmentStatus("Undelivered"), "undelivered");
+    assert.equal(mapShipmentStatus("Cancelled"), "undelivered");
     assert.equal(mapShipmentStatus(""), null);
     assert.equal(mapShipmentStatus(null), null);
 });
@@ -282,15 +282,15 @@ test("TRACKING-scan codes (shipment_track.status_code) map per the AWB endpoint 
     assert.notEqual(mapShipmentStatus(6, "track"), "delivered");
 });
 
-test("ORDER/shipment status_id codes map in their OWN space (distinct numbers)", () => {
-    assert.equal(mapShipmentStatus(6, "order"), "delivered"); // order-level 6 = Delivered
-    assert.equal(mapShipmentStatus(5, "order"), "out_for_delivery");
-    assert.equal(mapShipmentStatus(4, "order"), "in_transit");
+test("ORDER/shipment status_id codes map in their OWN space", () => {
+    assert.equal(mapShipmentStatus(7, "order"), "delivered"); // order-level 7 = Delivered
+    assert.equal(mapShipmentStatus(6, "order"), "shipped");   // order-level 6 = Shipped
+    assert.equal(mapShipmentStatus(17, "order"), "out_for_delivery");
+    assert.equal(mapShipmentStatus(18, "order"), "in_transit");
     assert.equal(mapShipmentStatus(3, "order"), "shipped"); // Picked Up → shipped progression
     assert.equal(mapShipmentStatus(1, "order"), null); // "New" must not advance a real status
-    // Same number, different meaning across spaces — proves they are not conflated:
     assert.equal(mapShipmentStatus(6, "track"), "shipped");
-    assert.equal(mapShipmentStatus(6, "order"), "delivered");
+    assert.equal(mapShipmentStatus(7, "track"), "delivered");
 });
 
 test('"Out For Pickup" is never reported as Out For Delivery (text variants too)', () => {
