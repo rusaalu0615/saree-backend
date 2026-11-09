@@ -910,8 +910,8 @@ const getRecommendations = async (req, res) => {
             priceQ,
             { isNewArrival: true },
             { isOnSale: true },
-            null, // broad: newest remaining
-        ].filter(Boolean);
+            { _id: { $nin: [...seen] } }, // broad fallback (explicit object, survives filter)
+        ];
         // Interleave staged candidates with variety (70% stage, 30% newest)
         // using a single pass of bounded indexed queries. Each query uses
         // compound indexes (category/material/collection + createdAt).
@@ -967,4 +967,23 @@ const getRecommendations = async (req, res) => {
     }
 };
 
-export default { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations };
+
+const getProductCardsByIds = async (req, res) => {
+    if (typeof res.setHeader === "function") res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids.slice(0, 20).map(String) : [];
+        if (!ids.length) return res.status(200).json({ success: true, products: [] });
+        const docs = await productModal.find({ _id: { $in: ids } }).select("_id name sku category price regularPrice stock mainImage galleryImages isNewArrival isOnSale averageRating numReviews").lean();
+        const byId = new Map(docs.map(d => [String(d._id), d]));
+        const products = ids.map(id => byId.get(id)).filter(Boolean).map(d => ({
+            _id: d._id, name: d.name, sku: d.sku, category: d.category,
+            price: d.price, regularPrice: d.regularPrice, stock: d.stock,
+            mainImage: d.mainImage, alternateImage: (d.galleryImages?.[0]?.url || d.galleryImages?.[0] || null),
+            averageRating: d.averageRating || 0, numReviews: d.numReviews || 0,
+            isNewArrival: Boolean(d.isNewArrival), isOnSale: Boolean(d.isOnSale),
+        }));
+        res.status(200).json({ success: true, products });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+export default { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations, getProductCardsByIds };

@@ -6,7 +6,7 @@ import { adminProtect } from "../middlewares/adminMiddleware.js";
 import validate from "../middlewares/validate.js";
 import { addProductSchema } from "../validations/schemas.js";
 
-const { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations } = productController;
+const { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations, getProductCardsByIds } = productController;
 
 const router = express.Router();
 
@@ -15,6 +15,7 @@ router.get("/allproducts", getAllProducts);
 router.get("/filters", getFilters);
 router.get("/by-sku/:sku", getProductBySku);
 router.get("/recommendations/:productId", getRecommendations);
+router.post("/cards-by-ids", getProductCardsByIds);
 router.get("/:id", getProductById);
 
 // Protected Admin routes (require whitelisted Admin token)
