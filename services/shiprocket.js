@@ -370,6 +370,27 @@ async function trackByShiprocketOrderId(shiprocketOrderId) {
     );
 }
 
+// Normalized shipment detail for pickup reconciliation. Reuses the tracked
+// shipment shapes already handled in shiprocketTracking.js. Confirmed pickup
+// = generated/scheduled date present OR shipment in a known pickup state.
+export function normalizeShipmentDetail(raw) {
+    const data = raw?.data ?? raw ?? {};
+    const shipment = data.shipment ?? data;
+    const tracking = data.tracking_data?.shipment_track?.[0] ?? null;
+    const pickupGeneratedAt = shipment.pickupGeneratedDate ?? shipment.pickup_generated_date ?? shipment.pickup_scheduled_date ?? tracking?.pickupGeneratedDate ?? null;
+    const status = shipment.status ?? tracking?.status ?? null;
+    const statusCode = shipment.status_id ?? shipment.status ?? tracking?.status_code ?? null;
+    const awb = shipment.awb_code ?? shipment.awb ?? null;
+    const courier = shipment.courier_name ?? shipment.courierName ?? data.courier_name ?? null;
+    const confirmed = Boolean(pickupGeneratedAt) || [2, 3].includes(Number(status)) || Number(statusCode) === 42;
+    return { shipmentId: shipment.id ?? shipment.shipment_id ?? null, shiprocketOrderId: shipment.order_id ?? shipment.sr_order_id ?? null, status, statusCode, awb, courier, pickupGeneratedAt, pickupScheduledAt: pickupGeneratedAt, confirmed };
+}
+
+async function getShipmentDetail(shipmentId) {
+    const data = await shiprocketFetch(`/shipments/${shipmentId}`);
+    return normalizeShipmentDetail(data);
+}
+
 /**
  * Classify Shiprocket order cancellation response into an explicit outcome:
  * Returns: { outcome: "confirmed" | "failed" | "uncertain", statusCode?: number, message?: string, raw?: any, error?: string }
@@ -540,6 +561,8 @@ export default {
     cancelShiprocketOrder,
     classifyShiprocketCancelResponse,
     generatePickup,
+    getShipmentDetail,
+    normalizeShipmentDetail,
     checkPincodeServiceability,
     clearServiceabilityCache,
 };
