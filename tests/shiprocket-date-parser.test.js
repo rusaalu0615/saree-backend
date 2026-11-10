@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseShiprocketDate, normalizeTrackingResult } from "../services/shiprocketTracking.js";
+import { parseShiprocketDate, parseTimezoneOffset, normalizeTrackingResult } from "../services/shiprocketTracking.js";
+import { parseShiprocketResponseBody, readShiprocketResponse } from "../services/shiprocket.js";
 import { syncOrderFromShipment } from "../controllers/orderController.js";
 
 test("Case 1: DD-MM-YYYY HH:mm:ss parsed as November 10, 2026 in IST -> 2026-11-09T18:33:37.000Z", () => {
@@ -121,5 +122,90 @@ test("Case 6: Chronology regression: rejects older events and advances newer Nov
         "2026-11-10T00:30:00.000Z",
         "Newer event must advance lastEventAt"
     );
+});
+
+test("Timezone offset tests: +05:30 == +0530 and -04:00 == -0400", () => {
+    const tCol = parseShiprocketDate("10-11-2026 00:03:37+05:30");
+    const tCompact = parseShiprocketDate("10-11-2026 00:03:37+0530");
+    assert.ok(tCol instanceof Date);
+    assert.ok(tCompact instanceof Date);
+    assert.equal(tCol.toISOString(), "2026-11-09T18:33:37.000Z");
+    assert.equal(tCompact.toISOString(), "2026-11-09T18:33:37.000Z");
+    assert.equal(tCol.getTime(), tCompact.getTime());
+
+    const tNegCol = parseShiprocketDate("10-11-2026 00:03:37-04:00");
+    const tNegCompact = parseShiprocketDate("10-11-2026 00:03:37-0400");
+    assert.ok(tNegCol instanceof Date);
+    assert.ok(tNegCompact instanceof Date);
+    assert.equal(tNegCol.toISOString(), tNegCompact.toISOString());
+    assert.equal(tNegCol.toISOString(), "2026-11-10T04:03:37.000Z");
+});
+
+test("Timezone offset tests: invalid offsets are rejected", () => {
+    assert.equal(parseTimezoneOffset("+2560"), null);
+    assert.equal(parseTimezoneOffset("+05:99"), null);
+    assert.equal(parseTimezoneOffset("+05"), null);
+    assert.equal(parseTimezoneOffset("invalid"), null);
+
+    assert.equal(parseShiprocketDate("10-11-2026 00:03:37+2560"), null);
+    assert.equal(parseShiprocketDate("10-11-2026 00:03:37+05:99"), null);
+});
+
+test("Shiprocket response parsing: valid JSON response", () => {
+    const raw = '{"token":"xyz-token-123","status":200}';
+    const parsed = parseShiprocketResponseBody(raw, 200, "test_auth");
+    assert.deepEqual(parsed.data, { token: "xyz-token-123", status: 200 });
+    assert.equal(parsed.raw, raw);
+});
+
+test("Shiprocket response parsing: empty Shiprocket response", () => {
+    const empty1 = parseShiprocketResponseBody("", 200, "empty_test");
+    assert.equal(empty1.data, null);
+    assert.equal(empty1.raw, "");
+
+    const empty2 = parseShiprocketResponseBody("   \r\n\t  ", 200, "empty_spaces");
+    assert.equal(empty2.data, null);
+    assert.equal(empty2.raw, "");
+});
+
+test("Shiprocket response parsing: malformed Shiprocket response", () => {
+    assert.throws(
+        () => parseShiprocketResponseBody("<html>502 Bad Gateway</html>", 502, "gateway_err"),
+        (err) => {
+            assert.match(err.message, /Shiprocket API error: HTTP 502 with invalid\/empty response/);
+            assert.doesNotMatch(err.message, /Unexpected end of JSON input/);
+            return true;
+        }
+    );
+});
+
+test("Shiprocket response parsing: non-2xx JSON response preserves error body", () => {
+    const raw = '{"message":"Invalid Status for pickup generation"}';
+    const parsed = parseShiprocketResponseBody(raw, 400, "pickup_err");
+    assert.equal(parsed.data?.message, "Invalid Status for pickup generation");
+});
+
+test("Shiprocket response parsing: readShiprocketResponse helper on fetch Response objects", async () => {
+    // 1. Valid 200 JSON
+    const res200 = new Response('{"token":"abc"}', { status: 200, headers: { "Content-Type": "application/json" } });
+    const p1 = await readShiprocketResponse(res200, "auth");
+    assert.equal(p1.data?.token, "abc");
+
+    // 2. 200 with empty body
+    const resEmpty = new Response("", { status: 200 });
+    const p2 = await readShiprocketResponse(resEmpty, "orders");
+    assert.equal(p2.data, null);
+
+    // 3. 502 non-JSON error
+    const res502 = new Response("<html>Bad Gateway</html>", { status: 502 });
+    await assert.rejects(
+        () => readShiprocketResponse(res502, "pickup"),
+        /Shiprocket API error: HTTP 502 with invalid\/empty response \(pickup\)/
+    );
+
+    // 4. 400 JSON error
+    const res400 = new Response('{"message":"Invalid status"}', { status: 400 });
+    const p4 = await readShiprocketResponse(res400, "pickup");
+    assert.equal(p4.data?.message, "Invalid status");
 });
 

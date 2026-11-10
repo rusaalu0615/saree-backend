@@ -2,25 +2,25 @@
  * DURABLE, RESUMABLE FULFILLMENT WORKER
  * ---------------------------------------------------------------------------
  * The Shiprocket pipeline is a persisted STAGE MACHINE on the order, driven by
- * a database-backed worker claim â€” not an in-memory flag (which is not a lock).
+ * a database-backed worker claim - not an in-memory flag (which is not a lock).
  * Any instance can safely run; a crashed/expired worker can never corrupt
  * another's progress because every stage write is a conditional update gated on
  * the CURRENT lock owner.
  *
  * Stages (order.fulfillment.stage):
- *   null / none            â†’ not yet eligible (set to "ready" on payment/COD)
- *   ready                  â†’ eligible, no create attempted yet
- *   create_uncertain       â†’ we may have asked Shiprocket to create and the
+ *   null / none            -> not yet eligible (set to "ready" on payment/COD)
+ *   ready                  -> eligible, no create attempted yet
+ *   create_uncertain       -> we may have asked Shiprocket to create and the
  *                            outcome is UNKNOWN (timeout / crash-after-send).
  *                            MUST reconcile via search before any 2nd create.
- *   sr_created             â†’ shipment exists (orderId + shipmentId stored)
- *   courier_pending        â†’ no courier serviceable yet (durable, retriable)
- *   courier_assigned       â†’ AWB assigned
- *   pickup_pending         â†’ pickup request previously rejected (retriable)
- *   pickup_requested       â†’ pickup scheduled
- *   complete               â†’ dispatched; reservation marked return_pending
- *   needs_reconciliation   â†’ ambiguous, resolve via provider search
- *   manual_review          â†’ retries exhausted; a human must act
+ *   sr_created             -> shipment exists (orderId + shipmentId stored)
+ *   courier_pending        -> no courier serviceable yet (durable, retriable)
+ *   courier_assigned       -> AWB assigned
+ *   pickup_pending         -> pickup request previously rejected (retriable)
+ *   pickup_requested       -> pickup scheduled
+ *   complete               -> dispatched; reservation marked return_pending
+ *   needs_reconciliation   -> ambiguous, resolve via provider search
+ *   manual_review          -> retries exhausted; a human must act
  *
  * Recovery explicitly includes COD orders AND paid orders whose stage is
  * null/none (the old replay only reconciled needs_reconciliation while blindly
@@ -40,7 +40,7 @@ import {
 const LEASE_MS = Number(process.env.FULFILLMENT_LEASE_MS || 90000);
 const MAX_FULFILLMENT_ATTEMPTS = Number(process.env.FULFILLMENT_MAX_ATTEMPTS || 8);
 // After we asked Shiprocket to create and lost the response, an EMPTY search can
-// simply be indexing lag â€” wait this long (and re-check across sweeps) before we
+// simply be indexing lag - wait this long (and re-check across sweeps) before we
 // ever trust CONFIRMED_ABSENT enough to attempt a second create.
 const RECONCILE_GRACE_MS = Number(process.env.SHIPROCKET_RECONCILE_GRACE_MS || 120000);
 
@@ -66,10 +66,10 @@ export const RESUMABLE_STAGES = [
 const isAmbiguous = (err) =>
     err && (err.name === "AbortError" || /timeout|network|socket|econn|etimedout|fetch failed/i.test(String(err.message || err)));
 
-// Shared eligibility â€” used BOTH to pick sweep candidates AND, crucially, in the
+// Shared eligibility - used BOTH to pick sweep candidates AND, crucially, in the
 // atomic claim itself, so eligibility is enforced at claim time, not only before.
 // A cancellation INTENT ("requested", even before status flips to "cancelled")
-// stops the pipeline just as hard as a completed cancellation â€” new fulfillment
+// stops the pipeline just as hard as a completed cancellation - new fulfillment
 // must never be started for an order the customer/admin has asked to cancel.
 function eligibilityFilter() {
     return {
@@ -216,7 +216,7 @@ async function stageEnsureShipment(order, claimToken) {
         }
 
         // UNKNOWN or a fresh/empty absence: keep the durable uncertain stage and
-        // reschedule â€” never fire a second create off this run.
+        // reschedule - never fire a second create off this run.
         const uncertainSince = order.fulfillment?.uncertainSince
             ? new Date(order.fulfillment.uncertainSince).getTime()
             : null;
@@ -224,12 +224,12 @@ async function stageEnsureShipment(order, claimToken) {
 
         if (lookup.outcome === "CONFIRMED_ABSENT" && agedOut) {
             // A well-formed absence that has aged past the grace window is now
-            // trustworthy â€” fall through to a single (re)create below.
+            // trustworthy - fall through to a single (re)create below.
         } else {
             const reason =
                 lookup.outcome === "UNKNOWN"
-                    ? `shipment lookup UNKNOWN (${lookup.reason || ""}) â€” not recreating`
-                    : `shipment search empty but within reconcile grace â€” re-checking later`;
+                    ? `shipment lookup UNKNOWN (${lookup.reason || ""}) - not recreating`
+                    : `shipment search empty but within reconcile grace - re-checking later`;
             await ownedUpdate(order._id, claimToken, {
                 "fulfillment.lastError": reason.slice(0, 300),
                 "fulfillment.nextAttemptAt": backoffDate(order.fulfillment?.attempts),
@@ -345,14 +345,14 @@ async function stageEnsureShipment(order, claimToken) {
                 $set: {
                     "cancellation.courierOutcome": cancelOutcome,
                     "fulfillment.stage": cancelOutcome === "confirmed" ? "cancelled" : "needs_reconciliation",
-                    "fulfillment.lastError": `Shipment ${result.shipment_id} created during cancellation â€” courier cancel ${cancelOutcome}`,
+                    "fulfillment.lastError": `Shipment ${result.shipment_id} created during cancellation - courier cancel ${cancelOutcome}`,
                     "fulfillment.lockUntil": null,
                     "fulfillment.updatedAt": new Date(),
                 },
                 $push: {
                     timeline: {
                         status: cancelOutcome === "confirmed" ? "Courier Cancel Confirmed" : "Courier Cancel Uncertain",
-                        description: `Shipment created during cancellation â€” courier cancel ${cancelOutcome}`,
+                        description: `Shipment created during cancellation - courier cancel ${cancelOutcome}`,
                         date: new Date(),
                     },
                 },
@@ -392,7 +392,7 @@ async function stageAssignCourier(order, claimToken) {
             "fulfillment.lastError": null,
         });
     } else if (courier) {
-        // Courier chosen but no AWB returned â€” serviceable, keep trying.
+        // Courier chosen but no AWB returned - serviceable, keep trying.
         await ownedUpdate(order._id, claimToken, {
             "shiprocket.courierName": courier.courierName,
             "shiprocket.courierCompanyId": courier.courierCompanyId,
@@ -400,7 +400,7 @@ async function stageAssignCourier(order, claimToken) {
             "fulfillment.nextAttemptAt": backoffDate(order.fulfillment?.attempts),
         });
     } else {
-        // No courier serviceable right now â€” durable retry, NOT an error state.
+        // No courier serviceable right now - durable retry, NOT an error state.
         await ownedUpdate(order._id, claimToken, {
             "fulfillment.stage": "courier_pending",
             "fulfillment.lastError": "no courier serviceable for pincode",
@@ -425,7 +425,8 @@ async function stageGeneratePickup(order, claimToken) {
             console.log(`[Fulfillment] ${order.orderId} pickup reconciling shipment ${order.shiprocket.shipmentId}`);
             if (detail?.confirmed || isPickupAlreadyEstablished(detail)) {
                 console.log(`[Fulfillment] ${order.orderId} pickup confirmed by Shiprocket`);
-                await ownedUpdate(order._id, claimToken, { "fulfillment.stage": "pickup_requested", "fulfillment.stageConfirmedAt": new Date(), "fulfillment.pickupScheduledFor": detail.pickupGeneratedAt || detail.pickupScheduledAt || new Date(), "fulfillment.lastError": null, "fulfillment.nextAttemptAt": null }, { timeline: { status: "Pickup Scheduled", description: "Courier pickup confirmed via Shiprocket reconciliation", date: new Date() } });
+                const pickupDate = detail.pickupGeneratedAt || detail.pickupScheduledAt || order.fulfillment?.pickupScheduledFor || null;
+                await ownedUpdate(order._id, claimToken, { "fulfillment.stage": "pickup_requested", "fulfillment.stageConfirmedAt": new Date(), "fulfillment.pickupScheduledFor": pickupDate, "fulfillment.lastError": null, "fulfillment.nextAttemptAt": null }, { timeline: { status: "Pickup Scheduled", description: "Courier pickup confirmed via Shiprocket reconciliation", date: new Date() } });
                 await stageComplete(order, claimToken);
                 return true;
             }
@@ -462,7 +463,7 @@ async function stageGeneratePickup(order, claimToken) {
         pickup?.data?.pickup_dates?.[0]?.pickup_origin_expected_date ||
         pickup?.data?.pickup_dates?.[0]?.pickup_scheduled_date ||
         null;
-    // A REAL confirmation â€” Shiprocket returns pickup_dates on an accepted
+    // A REAL confirmation - Shiprocket returns pickup_dates on an accepted
     // request. "No rejection AND no date" is NOT proof of a scheduled pickup, so
     // we do not advance (and definitely never treat it as a courier handover).
     const confirmed = !rejected && scheduledDate !== null;
@@ -473,25 +474,25 @@ async function stageGeneratePickup(order, claimToken) {
             order._id,
             claimToken,
             { "fulfillment.stage": "pickup_pending", "fulfillment.lastError": String(rejected).slice(0, 300), "fulfillment.nextAttemptAt": backoffDate(order.fulfillment?.attempts) },
-            { timeline: { status: "Pickup Pending", description: `Pickup rejected: ${String(rejected).slice(0, 150)} â€” will retry`, date: new Date() } }
+            { timeline: { status: "Pickup Pending", description: `Pickup rejected: ${String(rejected).slice(0, 150)} - will retry`, date: new Date() } }
         );
         return Order.findById(order._id);
     }
 
     if (!confirmed) {
         console.log(`[Fulfillment] ${order.orderId} pickup accepted without date; reconciling shipment`); if (await reconcilePickup()) return Order.findById(order._id);
-        // Ambiguous success (accepted but no scheduled date) â€” retry the pickup;
+        // Ambiguous success (accepted but no scheduled date) - retry the pickup;
         // this is NOT a dispatch and must not mark stock return_pending.
         await ownedUpdate(
             order._id,
             claimToken,
-            { "fulfillment.stage": "pickup_pending", "fulfillment.lastError": "pickup accepted but no scheduled date returned â€” re-confirming", "fulfillment.nextAttemptAt": backoffDate(order.fulfillment?.attempts) }
+            { "fulfillment.stage": "pickup_pending", "fulfillment.lastError": "pickup accepted but no scheduled date returned - re-confirming", "fulfillment.nextAttemptAt": backoffDate(order.fulfillment?.attempts) }
         );
         return Order.findById(order._id);
     }
 
     // Pickup SUCCEEDED with a real scheduled date. Advance to pickup_requested
-    // (scheduled) â€” this is still NOT a physical handover; the reservation is
+    // (scheduled) - this is still NOT a physical handover; the reservation is
     // only frozen (return_pending) once real tracking reports a courier pickup.
     await ownedUpdate(
         order._id,
@@ -505,7 +506,7 @@ async function stageGeneratePickup(order, claimToken) {
 async function stageComplete(order, claimToken) {
     // The fulfillment PIPELINE's job ends at a scheduled pickup: getting the
     // shipment created, a courier assigned and a pickup booked. "Pickup
-    // scheduled" is deliberately NOT treated as a physical handover here â€” the
+    // scheduled" is deliberately NOT treated as a physical handover here - the
     // reservation stays "held" (a genuine pre-handover cancel can still release
     // stock) and only syncOrderFromShipment, on a REAL courier scan, flips it to
     // return_pending. So completing the stage must NOT mark dispatched.
@@ -514,7 +515,7 @@ async function stageComplete(order, claimToken) {
         order._id,
         claimToken,
         { "fulfillment.stage": "complete", "fulfillment.stageConfirmedAt": new Date(), "fulfillment.lastError": null, "fulfillment.nextAttemptAt": null },
-        { timeline: { status: "Pickup Booked", description: "Shipment handed to courier schedule â€” awaiting pickup scan", date: new Date() } }
+        { timeline: { status: "Pickup Booked", description: "Shipment handed to courier schedule - awaiting pickup scan", date: new Date() } }
     );
     if (done.modifiedCount === 1) {
         await enqueueShippingEmail(order._id, "processing").catch(() => {});
@@ -543,7 +544,7 @@ export async function runFulfillmentForOrder(orderId, workerId = WORKER_ID) {
             ["requested", "completed"].includes(cur.cancellation?.status) ||
             cur.fulfillmentHold?.active
         ) {
-            await releaseLease(order._id, claimToken, { "fulfillment.lastError": "cancelled/held/cancel-requested â€” pipeline stopped" });
+            await releaseLease(order._id, claimToken, { "fulfillment.lastError": "cancelled/held/cancel-requested - pipeline stopped" });
             return true; // stop
         }
         // Lease may have expired mid-run; confirm we still own it (our claim token).
@@ -591,7 +592,7 @@ export async function runFulfillmentForOrder(orderId, workerId = WORKER_ID) {
             "fulfillment.updatedAt": new Date(),
             "fulfillment.nextAttemptAt": exhausted ? null : backoffDate(attempts),
         };
-        // Ambiguous create â†’ keep the uncertain stage so a resume reconciles.
+        // Ambiguous create -> keep the uncertain stage so a resume reconciles.
         if (ambiguous && !order.shiprocket?.orderId) {
             set["fulfillment.stage"] = "create_uncertain";
             set["fulfillment.uncertainSince"] = order.fulfillment?.uncertainSince || new Date();
@@ -606,7 +607,7 @@ export async function runFulfillmentForOrder(orderId, workerId = WORKER_ID) {
 }
 
 /**
- * Bounded, indexed sweep for anything eligible â€” COD + paid orders whose stage
+ * Bounded, indexed sweep for anything eligible - COD + paid orders whose stage
  * is resumable OR null/none. Null/none eligible orders (missed after a crash or
  * a paid order never flipped to ready) are first nudged to "ready" so they
  * become claimable, then each candidate is run through the atomic claim.

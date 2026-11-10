@@ -184,13 +184,38 @@ function collectActivities(src) {
 const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
 
 /**
+ * Parse timezone offset string (e.g. "Z", "+05:30", "+0530", "-04:00", "-0400", "IST").
+ * Returns offset in milliseconds, or null if malformed/invalid.
+ * Default (empty/IST) is Indian Standard Time (+05:30).
+ */
+export function parseTimezoneOffset(tzStr) {
+    if (!tzStr || tzStr.toUpperCase() === "IST") {
+        return IST_OFFSET_MS;
+    }
+    const s = tzStr.trim();
+    if (s.toUpperCase() === "Z") {
+        return 0;
+    }
+    const match = s.match(/^([+-])(\d{2}):?(\d{2})$/);
+    if (!match) return null;
+
+    const sign = match[1] === "+" ? 1 : -1;
+    const hours = Number(match[2]);
+    const minutes = Number(match[3]);
+
+    if (hours > 23 || minutes > 59) return null;
+
+    return sign * (hours * 60 + minutes) * 60 * 1000;
+}
+
+/**
  * Parse Shiprocket date strings and timestamps into a JavaScript Date.
  * Shiprocket timestamps without timezone (such as "DD-MM-YYYY HH:mm:ss" or "DD-MM-YYYY")
  * are explicitly treated as India Standard Time (IST, UTC+05:30).
  *
  * Supported formats:
- *   - DD-MM-YYYY [HH:mm[:ss]] [IST]
- *   - YYYY-MM-DD [HH:mm[:ss]] [IST]
+ *   - DD-MM-YYYY [HH:mm[:ss]] [IST / offset]
+ *   - YYYY-MM-DD [HH:mm[:ss]] [IST / offset]
  *   - ISO-8601 timestamps (with Z or +/-HH:mm offset)
  *   - Date objects
  *
@@ -205,14 +230,14 @@ export function parseShiprocketDate(value) {
     const str = value.trim();
     if (!str) return null;
 
-    // 1. ISO-8601 with explicit timezone (Z or offset, e.g. 2026-11-10T05:00:00.000Z)
+    // 1. ISO-8601 with explicit timezone (Z or offset, e.g. 2026-11-10T05:00:00.000Z or +0530)
     if (/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(str)) {
         const d = new Date(str.includes(" ") && !str.includes("T") ? str.replace(" ", "T") : str);
         return isNaN(d.getTime()) ? null : d;
     }
 
-    // 2. DD-MM-YYYY [HH:mm[:ss]] [IST]
-    const ddmmyyyy = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})(?:[\sT](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?(?:\s*(?:(Z|[+-]\d{2}:?\d{2})|IST))?$/i);
+    // 2. DD-MM-YYYY [HH:mm[:ss]] [IST / offset]
+    const ddmmyyyy = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})(?:[\sT](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?(?:\s*(?:(Z|[+-]\S+)|IST))?$/i);
     if (ddmmyyyy) {
         const day = Number(ddmmyyyy[1]);
         const month = Number(ddmmyyyy[2]);
@@ -226,26 +251,15 @@ export function parseShiprocketDate(value) {
         const check = new Date(Date.UTC(year, month - 1, day, hour, min, sec, ms));
         if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null;
 
-        let tzOffsetMs = IST_OFFSET_MS;
-        const explicitTz = ddmmyyyy[8];
-        if (explicitTz) {
-            if (explicitTz.toUpperCase() === "Z") {
-                tzOffsetMs = 0;
-            } else {
-                const sign = explicitTz[0] === "+" ? 1 : -1;
-                const parts = explicitTz.slice(1).split(":");
-                const tzH = Number(parts[0]);
-                const tzM = parts[1] !== undefined ? Number(parts[1]) : 0;
-                tzOffsetMs = sign * (tzH * 60 + tzM) * 60 * 1000;
-            }
-        }
+        const tzOffsetMs = parseTimezoneOffset(ddmmyyyy[8]);
+        if (tzOffsetMs === null) return null;
 
         const utcMs = Date.UTC(year, month - 1, day, hour, min, sec, ms) - tzOffsetMs;
         return new Date(utcMs);
     }
 
-    // 3. YYYY-MM-DD [HH:mm[:ss]] [IST]
-    const yyyymmdd = str.match(/^(\d{4})[-/](\d{2})[-/](\d{2})(?:[\sT](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?(?:\s*(?:(Z|[+-]\d{2}:?\d{2})|IST))?$/i);
+    // 3. YYYY-MM-DD [HH:mm[:ss]] [IST / offset]
+    const yyyymmdd = str.match(/^(\d{4})[-/](\d{2})[-/](\d{2})(?:[\sT](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?(?:\s*(?:(Z|[+-]\S+)|IST))?$/i);
     if (yyyymmdd) {
         const year = Number(yyyymmdd[1]);
         const month = Number(yyyymmdd[2]);
@@ -259,19 +273,8 @@ export function parseShiprocketDate(value) {
         const check = new Date(Date.UTC(year, month - 1, day, hour, min, sec, ms));
         if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null;
 
-        let tzOffsetMs = IST_OFFSET_MS;
-        const explicitTz = yyyymmdd[8];
-        if (explicitTz) {
-            if (explicitTz.toUpperCase() === "Z") {
-                tzOffsetMs = 0;
-            } else {
-                const sign = explicitTz[0] === "+" ? 1 : -1;
-                const parts = explicitTz.slice(1).split(":");
-                const tzH = Number(parts[0]);
-                const tzM = parts[1] !== undefined ? Number(parts[1]) : 0;
-                tzOffsetMs = sign * (tzH * 60 + tzM) * 60 * 1000;
-            }
-        }
+        const tzOffsetMs = parseTimezoneOffset(yyyymmdd[8]);
+        if (tzOffsetMs === null) return null;
 
         const utcMs = Date.UTC(year, month - 1, day, hour, min, sec, ms) - tzOffsetMs;
         return new Date(utcMs);
@@ -430,6 +433,7 @@ export default {
     STATUS_RANK,
     mapShipmentStatus,
     parseShiprocketDate,
+    parseTimezoneOffset,
     normalizeTrackingResult,
     sanitizeTrackingForPublic,
     resolveTracking,

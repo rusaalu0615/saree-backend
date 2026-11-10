@@ -37,6 +37,62 @@ async function fetchWithTimeout(url, options = {}) {
 }
 
 /**
+ * Safely parses raw Shiprocket HTTP response text without throwing native JSON errors.
+ * Returns { data, raw } or throws sanitized Shiprocket API error.
+ */
+export function parseShiprocketResponseBody(rawText, status = 200, context = "request") {
+    const raw = typeof rawText === "string" ? rawText : "";
+    const trimmed = raw.trim();
+
+    if (!trimmed) {
+        return { data: null, raw: "" };
+    }
+
+    try {
+        const data = JSON.parse(trimmed);
+        return { data, raw: trimmed };
+    } catch {
+        const preview = trimmed.slice(0, 100).replace(/[\r\n\t]+/g, " ");
+        throw new Error(`Shiprocket API error: HTTP ${status} with invalid/empty response (${context}${preview ? `: "${preview}"` : ""})`);
+    }
+}
+
+/**
+ * Reusable defensive response reader for fetch responses from Shiprocket.
+ */
+export async function readShiprocketResponse(res, context = "request") {
+    let rawText = "";
+    if (typeof res?.text === "function") {
+        try {
+            rawText = await res.text();
+        } catch (readErr) {
+            throw new Error(`Shiprocket API error: HTTP ${res.status} network read failed (${context})`);
+        }
+    } else if (typeof res?.json === "function") {
+        try {
+            const data = await res.json();
+            return { data: data ?? null, raw: JSON.stringify(data) };
+        } catch (jsonErr) {
+            throw new Error(`Shiprocket API error: HTTP ${res.status} with invalid/empty response (${context})`);
+        }
+    } else {
+        throw new Error(`Shiprocket API error: HTTP ${res?.status || 500} unreadable response object (${context})`);
+    }
+
+    let parsed;
+    try {
+        parsed = parseShiprocketResponseBody(rawText, res.status, context);
+    } catch (parseErr) {
+        if (!res.ok) {
+            throw new Error(`Shiprocket API error: HTTP ${res.status} with invalid/empty response (${context})`);
+        }
+        throw parseErr;
+    }
+
+    return parsed;
+}
+
+/**
  * Authenticate with Shiprocket and cache the bearer token (valid ~10 days).
  * We refresh every 24 hours to be safe. Concurrent misses are de-duplicated so
  * only one login request is ever in flight.
@@ -64,10 +120,11 @@ async function getToken() {
                 body: JSON.stringify({ email, password }),
             });
 
-            const data = await res.json();
+            const { data } = await readShiprocketResponse(res, "auth_login");
 
-            if (!res.ok || !data.token) {
-                throw new Error(`Shiprocket auth failed: ${data.message || res.statusText}`);
+            if (!res.ok || !data || !data.token) {
+                const msg = data?.message || (!res.ok ? `HTTP ${res.status}` : "missing token");
+                throw new Error(`Shiprocket auth failed: ${msg}`);
             }
 
             cachedToken = data.token;
@@ -101,18 +158,21 @@ async function shiprocketFetch(endpoint, options = {}) {
     let res = await doCall(await getToken());
 
     if (res.status === 401) {
-        console.warn(`[Shiprocket] 401 on ${endpoint} — refreshing token and retrying once`);
+        console.warn(`[Shiprocket] 401 on ${endpoint} - refreshing token and retrying once`);
         cachedToken = null;
         tokenExpiry = null;
         res = await doCall(await getToken());
     }
 
-    const data = await res.json();
+    const { data } = await readShiprocketResponse(res, endpoint);
 
     if (!res.ok) {
-        const errorMsg = data.message || data.errors || res.statusText;
-        console.error(`Shiprocket API error [${endpoint}]:`, errorMsg);
-        throw new Error(`Shiprocket API error: ${JSON.stringify(errorMsg)}`);
+        if (data && typeof data === "object") {
+            const errorMsg = data.message || data.errors || res.statusText || `HTTP ${res.status}`;
+            console.error(`Shiprocket API error [${endpoint}]:`, errorMsg);
+            throw new Error(`Shiprocket API error: ${JSON.stringify(errorMsg)}`);
+        }
+        throw new Error(`Shiprocket API error: HTTP ${res.status} with invalid/empty response (${endpoint})`);
     }
 
     // Application-level success: Shiprocket returns HTTP 200 with a business
@@ -678,6 +738,8 @@ export default {
     classifyShiprocketCancelResponse,
     generatePickup,
     parseShiprocketDate,
+    parseShiprocketResponseBody,
+    readShiprocketResponse,
     getShipmentDetail,
     normalizeShipmentDetail,
     isPickupAlreadyEstablished,

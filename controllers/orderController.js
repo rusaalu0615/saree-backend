@@ -1583,11 +1583,12 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
         // Authoritative tracking evidence (webhook or sweep) self-heals stale fulfillment stages
         if (orderDoc.fulfillment && ["pickup_pending", "courier_assigned"].includes(orderDoc.fulfillment.stage)) {
             if (isPickupAlreadyEstablished(normalized)) {
+                const previousStage = orderDoc.fulfillment.stage;
                 orderDoc.fulfillment.stage = "complete";
                 orderDoc.fulfillment.stageConfirmedAt = orderDoc.fulfillment.stageConfirmedAt || new Date();
                 orderDoc.fulfillment.lastError = null;
                 orderDoc.fulfillment.nextAttemptAt = null;
-                console.log(`[Sync] ${orderDoc.orderId} repaired stale fulfillment stage '${orderDoc.fulfillment.stage}' -> 'complete' via authoritative tracking (${srStatus})`);
+                console.log(`[Sync] ${orderDoc.orderId} repaired stale fulfillment stage '${previousStage}' -> 'complete' via authoritative tracking (${srStatus})`);
             }
         }
 
