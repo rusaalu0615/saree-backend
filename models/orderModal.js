@@ -238,6 +238,10 @@ const orderSchema = new mongoose.Schema({
         lastEventAt: Date,
         expectedDeliveryAt: Date,
         lastSyncedAt: Date,
+        trackingAttempts: { type: Number, default: 0 },
+        lastTrackingAttemptAt: Date,
+        nextTrackingAt: Date,
+        lastTrackingError: String,
     },
     status: {
         type: String,
@@ -289,5 +293,7 @@ orderSchema.index({ "gatewayInit.status": 1, "gatewayInit.claimExpiresAt": 1 });
 orderSchema.index({ "payment.status": 1, "gatewayInit.nextAttemptAt": 1, createdAt: 1 });
 orderSchema.index({ "cancellation.status": 1 });
 orderSchema.index({ "cancellation.status": 1, "cancellation.nextAttemptAt": 1 });
+orderSchema.index({ status: 1, "delivery.nextTrackingAt": 1 });
+orderSchema.index({ "delivery.nextTrackingAt": 1, createdAt: 1 });
 
 export default mongoose.model("Order", orderSchema);

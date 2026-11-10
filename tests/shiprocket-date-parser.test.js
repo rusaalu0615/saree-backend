@@ -209,3 +209,72 @@ test("Shiprocket response parsing: readShiprocketResponse helper on fetch Respon
     assert.equal(p4.data?.message, "Invalid status");
 });
 
+test("Production regression: eventTime falls back to newest valid activity date when explicit dates are missing", () => {
+    const payload = {
+        tracking_data: {
+            shipment_status_id: 19,
+            current_status: "Out for Pickup",
+            shipment_track_activities: [
+                {
+                    date: "2026-11-09 18:55:00",
+                    activity: "NA",
+                },
+                {
+                    date: "2026-11-10 00:01:00",
+                    activity: "OUT FOR PICKUP",
+                },
+            ],
+        },
+    };
+
+    const normalized = normalizeTrackingResult(payload);
+    assert.ok(normalized);
+    assert.equal(normalized.mappedStatus, "processing");
+    assert.equal(normalized.currentStatus, "Out For Pickup");
+    assert.equal(normalized.eventTime, "2026-11-09T18:31:00.000Z");
+});
+
+test("eventTime priority: explicit primary timestamp remains authoritative over newer activity", () => {
+    const payload = {
+        current_timestamp: "10-11-2026 00:03:37",
+        tracking_data: {
+            shipment_status_id: 19,
+            current_status: "Out for Pickup",
+            shipment_track_activities: [
+                {
+                    date: "2026-11-12 10:00:00",
+                    activity: "OUT FOR PICKUP",
+                },
+            ],
+        },
+    };
+
+    const normalized = normalizeTrackingResult(payload);
+    assert.ok(normalized);
+    // 10-11-2026 00:03:37 IST -> 2026-11-09T18:33:37.000Z
+    assert.equal(normalized.eventTime, "2026-11-09T18:33:37.000Z");
+});
+
+test("eventTime invalid activity: all malformed activity dates result in eventTime = null", () => {
+    const payload = {
+        tracking_data: {
+            shipment_status_id: 19,
+            current_status: "Out for Pickup",
+            shipment_track_activities: [
+                {
+                    date: "garbage-date",
+                    activity: "NA",
+                },
+                {
+                    date: "31-02-2026 12:00:00",
+                    activity: "OUT FOR PICKUP",
+                },
+            ],
+        },
+    };
+
+    const normalized = normalizeTrackingResult(payload);
+    assert.ok(normalized);
+    assert.equal(normalized.eventTime, null);
+});
+

@@ -349,8 +349,41 @@ export function normalizeTrackingResult(raw) {
             location: a.location || a.city || a.from || null,
         }));
 
-    const rawEventTime = src.current_timestamp || src.date || src.shipment_track_date || firstTrack?.date || firstTrack?.shipment_track_date || null;
-    const parsedEvent = parseShiprocketDate(rawEventTime);
+    const candidateExplicit = [
+        src.current_timestamp,
+        src.date,
+        src.shipment_track_date,
+        firstTrack?.date,
+        firstTrack?.shipment_track_date,
+    ];
+    let parsedEvent = null;
+    for (const cand of candidateExplicit) {
+        if (!cand) continue;
+        const d = parseShiprocketDate(cand);
+        if (d) {
+            parsedEvent = d;
+            break;
+        }
+    }
+
+    if (!parsedEvent && Array.isArray(activities) && activities.length > 0) {
+        let latestDate = null;
+        let latestTimeMs = -Infinity;
+        for (const act of activities) {
+            if (!act?.date) continue;
+            const parsedActDate = parseShiprocketDate(act.date);
+            if (!parsedActDate) continue;
+            const timeMs = parsedActDate.getTime();
+            if (timeMs > latestTimeMs) {
+                latestTimeMs = timeMs;
+                latestDate = parsedActDate;
+            }
+        }
+        if (latestDate) {
+            parsedEvent = latestDate;
+        }
+    }
+
     const eventTime = parsedEvent ? parsedEvent.toISOString() : null;
 
     const rawEtd = src.etd || src.expected_date || src.edd || src.delivery_date || null;
