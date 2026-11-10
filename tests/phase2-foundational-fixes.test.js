@@ -404,9 +404,15 @@ describe("PHASE 2: Foundational Correctness and Authentication Fixes", () => {
 
             // First verification succeeds
             await adminAuthController.verifyAdminOTP(
-                { body: { email: testAdminEmail, otp: rawOtp } },
+                {
+                    body: { email: testAdminEmail, otp: rawOtp },
+                    secure: false,
+                    headers: {},
+                },
                 res,
-                () => {}
+                (err) => {
+                    if (err) throw err;
+                }
             );
             assert.equal(resStatus, 200);
             assert.ok(resJson.token);
@@ -421,9 +427,15 @@ describe("PHASE 2: Foundational Correctness and Authentication Fixes", () => {
             };
 
             await adminAuthController.verifyAdminOTP(
-                { body: { email: testAdminEmail, otp: rawOtp } },
+                {
+                    body: { email: testAdminEmail, otp: rawOtp },
+                    secure: false,
+                    headers: {},
+                },
                 res2,
-                () => {}
+                (err) => {
+                    if (err) throw err;
+                }
             );
             assert.equal(secondStatus, 400);
             assert.match(secondJson.message, /expired or maximum attempts/i);

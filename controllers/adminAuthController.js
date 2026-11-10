@@ -176,7 +176,7 @@ export const verifyAdminOTP = asyncHandler(async (req, res) => {
     const secure = Boolean(
         process.env.NODE_ENV === "production" ||
         req.secure ||
-        req.headers["x-forwarded-proto"] === "https"
+        req.headers?.["x-forwarded-proto"] === "https"
     );
     res.cookie("auth_token", token, {
         httpOnly: true,
