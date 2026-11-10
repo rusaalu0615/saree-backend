@@ -7,7 +7,7 @@ import User from "../models/userModal.js";
 import Coupon from "../models/couponModal.js";
 import WebhookEvent from "../models/webhookEventModel.js";
 import EmailJob from "../models/emailJobModel.js";
-import shiprocket from "../services/shiprocket.js";
+import shiprocket, { isPickupAlreadyEstablished } from "../services/shiprocket.js";
 import emailService from "../services/emailService.js";
 import invoiceService from "../services/invoiceService.js";
 import AppError from "../utils/AppError.js";
@@ -1579,6 +1579,17 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
         const n = normalized;
         const srStatus = n?.currentStatus || n?.shipmentStatus;
         if (!srStatus) return;
+
+        // Authoritative tracking evidence (webhook or sweep) self-heals stale fulfillment stages
+        if (orderDoc.fulfillment && ["pickup_pending", "courier_assigned"].includes(orderDoc.fulfillment.stage)) {
+            if (isPickupAlreadyEstablished(normalized)) {
+                orderDoc.fulfillment.stage = "complete";
+                orderDoc.fulfillment.stageConfirmedAt = orderDoc.fulfillment.stageConfirmedAt || new Date();
+                orderDoc.fulfillment.lastError = null;
+                orderDoc.fulfillment.nextAttemptAt = null;
+                console.log(`[Sync] ${orderDoc.orderId} repaired stale fulfillment stage '${orderDoc.fulfillment.stage}' -> 'complete' via authoritative tracking (${srStatus})`);
+            }
+        }
 
         // Already-canonical payloads (from webhook fast path) skip re-normalize.
         const mapped = normalized.mappedStatus;

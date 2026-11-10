@@ -370,6 +370,90 @@ async function trackByShiprocketOrderId(shiprocketOrderId) {
     );
 }
 
+// Authoritative Shiprocket codes and text that prove pickup has been established
+function isPickupStatusCode(code) {
+    // 3 = Pickup Scheduled/Generated
+    // 4 = Pickup Queued
+    // 15 = Pickup Rescheduled
+    // 19 = Out For Pickup
+    // 42 = Picked Up
+    // Later forward stages that guarantee pickup was established:
+    // 6, 14 = Shipped
+    // 18 = In Transit
+    // 17 = Out For Delivery
+    // 7 = Delivered
+    // 38 = Reached Destination Hub
+    // 9, 10, 41, 46 = RTO stages
+    const CODES = new Set([3, 4, 15, 19, 42, 6, 14, 18, 17, 7, 38, 9, 10, 41, 46]);
+    return CODES.has(code);
+}
+
+function isPickupStatusText(text) {
+    if (!text) return false;
+    if (
+        text.includes("pickup scheduled") ||
+        text.includes("pickup generated") ||
+        text.includes("pickup queued") ||
+        text.includes("pickup rescheduled") ||
+        text.includes("out for pickup") ||
+        text.includes("picked up") ||
+        text.includes("pickup done") ||
+        text.includes("pickup complete") ||
+        text.includes("shipped") ||
+        text.includes("in transit") ||
+        text.includes("out for delivery") ||
+        text.includes("delivered") ||
+        text.includes("rto")
+    ) {
+        if (!text.includes("pickup pending") && !text.includes("pickup error") && !text.includes("pickup failed") && !text.includes("pickup exception")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+export function isPickupAlreadyEstablished(detailOrStatus) {
+    if (!detailOrStatus) return false;
+
+    if (typeof detailOrStatus === "object") {
+        if (Boolean(detailOrStatus.pickupGeneratedAt) || Boolean(detailOrStatus.pickupScheduledAt)) {
+            return true;
+        }
+        const rawCode = detailOrStatus.statusCode != null
+            ? Number(detailOrStatus.statusCode)
+            : (detailOrStatus.rawStatusCode != null
+                ? Number(detailOrStatus.rawStatusCode)
+                : (detailOrStatus.shipment_status_id != null
+                    ? Number(detailOrStatus.shipment_status_id)
+                    : (detailOrStatus.rawStatus != null && !isNaN(Number(detailOrStatus.rawStatus))
+                        ? Number(detailOrStatus.rawStatus)
+                        : (detailOrStatus.status != null && !isNaN(Number(detailOrStatus.status))
+                            ? Number(detailOrStatus.status)
+                            : null))));
+
+        if (rawCode != null && isPickupStatusCode(rawCode)) {
+            return true;
+        }
+
+        const text = String(
+            detailOrStatus.currentStatus ||
+            detailOrStatus.shipmentStatus ||
+            detailOrStatus.current_status ||
+            detailOrStatus.shipment_status ||
+            detailOrStatus.status ||
+            detailOrStatus.rawStatus ||
+            ""
+        ).toLowerCase().trim();
+        return isPickupStatusText(text);
+    }
+
+    if (typeof detailOrStatus === "number" || (!isNaN(Number(detailOrStatus)) && String(detailOrStatus).trim() !== "")) {
+        return isPickupStatusCode(Number(detailOrStatus));
+    }
+
+    return isPickupStatusText(String(detailOrStatus).toLowerCase().trim());
+}
+
 // Normalized shipment detail for pickup reconciliation. Reuses the tracked
 // shipment shapes already handled in shiprocketTracking.js. Confirmed pickup
 // = generated/scheduled date present OR shipment in a known pickup state.
@@ -383,7 +467,12 @@ export function normalizeShipmentDetail(raw) {
     const statusCode = shipment.statusCode ?? shipment.status_code ?? shipment.status_id ?? shipment.status ?? tracking?.status_code ?? null;
     const awb = shipment.awb_code ?? shipment.awb ?? tracking?.awb_code ?? tracking?.awb ?? null;
     const courier = shipment.courier_name ?? shipment.courierName ?? tracking?.courier_name ?? data.courier_name ?? null;
-    const confirmed = Boolean(pickupGeneratedAt) || Boolean(pickupScheduledAt) || Number(status) === 3 || Number(status) === 42 || Number(statusCode) === 3 || Number(statusCode) === 42 || Number(shipment.status_code) === 42 || Number(shipment.status_id) === 42;
+    const confirmed = isPickupAlreadyEstablished({
+        pickupGeneratedAt,
+        pickupScheduledAt,
+        status,
+        statusCode: statusCode ?? shipment.status_code ?? shipment.status_id,
+    });
 
     const eventTime = tracking?.current_timestamp ?? tracking?.date ?? tracking?.shipment_track_date ?? data.current_timestamp ?? shipment.current_timestamp ?? null;
     const etd = tracking?.etd ?? tracking?.expected_date ?? tracking?.edd ?? data.etd ?? shipment.etd ?? shipment.expected_date ?? shipment.edd ?? null;
@@ -582,6 +671,7 @@ export default {
     generatePickup,
     getShipmentDetail,
     normalizeShipmentDetail,
+    isPickupAlreadyEstablished,
     checkPincodeServiceability,
     clearServiceabilityCache,
 };
