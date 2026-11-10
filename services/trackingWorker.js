@@ -40,8 +40,8 @@ export async function runTrackingSweep(batchLimit = 15) {
                         : (detail.status ? mapShipmentStatus(detail.status, "order") : null);
                     tracking = {
                         __canonical: true,
-                        eventTime: detail.pickupGeneratedAt || detail.pickupScheduledAt || null,
-                        etd: null,
+                        eventTime: detail.eventTime || null,
+                        etd: detail.etd || null,
                         awb: detail.awb || null,
                         shipmentId: detail.shipmentId || order.shiprocket.shipmentId,
                         courierName: detail.courier || null,
@@ -49,7 +49,7 @@ export async function runTrackingSweep(batchLimit = 15) {
                         shipmentStatus: detail.status || null,
                         currentStatus: detail.status || null,
                         mappedStatus,
-                        trackUrl: null,
+                        trackUrl: detail.trackUrl || null,
                         activities: [],
                     };
                 }

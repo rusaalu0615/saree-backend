@@ -52,7 +52,7 @@ test("Required shipment mappings", () => {
 test("idempotency: pickup_requested/complete short-circuits pickup stage", async () => {
   // Worker entry already guards by stage; assert worker file contains the guard.
   const fs = await import("node:fs");
-  const src = fs.readFileSync("services/fulfillmentWorker.js", "utf8");
+  const src = fs.readFileSync(new URL("../services/fulfillmentWorker.js", import.meta.url), "utf8");
   assert.match(src, /courier_assigned.*pickup_pending/);
   assert.match(src, /stageGeneratePickup/);
 });

@@ -376,14 +376,32 @@ async function trackByShiprocketOrderId(shiprocketOrderId) {
 export function normalizeShipmentDetail(raw) {
     const data = raw?.data ?? raw ?? {};
     const shipment = data.shipment ?? data;
-    const tracking = data.tracking_data?.shipment_track?.[0] ?? null;
+    const tracking = data.tracking_data?.shipment_track?.[0] ?? data.tracking?.[0] ?? null;
     const pickupGeneratedAt = shipment.pickupGeneratedDate ?? shipment.pickup_generated_date ?? shipment.pickup_scheduled_date ?? tracking?.pickupGeneratedDate ?? null;
     const status = shipment.status ?? tracking?.status ?? null;
     const statusCode = shipment.statusCode ?? shipment.status_code ?? shipment.status_id ?? shipment.status ?? tracking?.status_code ?? null;
-    const awb = shipment.awb_code ?? shipment.awb ?? null;
-    const courier = shipment.courier_name ?? shipment.courierName ?? data.courier_name ?? null;
+    const awb = shipment.awb_code ?? shipment.awb ?? tracking?.awb_code ?? tracking?.awb ?? null;
+    const courier = shipment.courier_name ?? shipment.courierName ?? tracking?.courier_name ?? data.courier_name ?? null;
     const confirmed = Boolean(pickupGeneratedAt) || Number(status) === 3 || Number(status) === 42 || Number(statusCode) === 3 || Number(statusCode) === 42 || Number(shipment.status_code) === 42 || Number(shipment.status_id) === 42;
-    return { shipmentId: shipment.id ?? shipment.shipment_id ?? null, shiprocketOrderId: shipment.order_id ?? shipment.sr_order_id ?? null, status, statusCode, awb, courier, pickupGeneratedAt, pickupScheduledAt: pickupGeneratedAt, confirmed };
+
+    const eventTime = tracking?.current_timestamp ?? tracking?.date ?? tracking?.shipment_track_date ?? data.current_timestamp ?? shipment.current_timestamp ?? null;
+    const etd = tracking?.etd ?? tracking?.expected_date ?? tracking?.edd ?? data.etd ?? shipment.etd ?? shipment.expected_date ?? shipment.edd ?? null;
+    const trackUrl = tracking?.track_url ?? data.track_url ?? shipment.track_url ?? null;
+
+    return {
+        shipmentId: shipment.id ?? shipment.shipment_id ?? null,
+        shiprocketOrderId: shipment.order_id ?? shipment.sr_order_id ?? null,
+        status,
+        statusCode,
+        awb,
+        courier,
+        pickupGeneratedAt,
+        pickupScheduledAt: pickupGeneratedAt,
+        confirmed,
+        eventTime,
+        etd,
+        trackUrl,
+    };
 }
 
 async function getShipmentDetail(shipmentId) {

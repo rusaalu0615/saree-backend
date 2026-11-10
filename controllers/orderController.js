@@ -1564,20 +1564,30 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             const incomingRank = RTO_RANK[mapped] ?? -1;
             const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
             const incomingEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : 0;
-            if (existingRank !== -1 && incomingRank !== -1 && incomingRank < existingRank) {
-                console.log(`[Sync] ${orderDoc.orderId} stale RTO/logistics event ignored`);
-                return;
-            }
+
+            const isStaleRto = existingRank !== -1 && incomingRank !== -1 && incomingRank < existingRank;
+            const hasValidTimestamps = Number.isFinite(incomingEvent) && incomingEvent > 0 && Number.isFinite(prevEvent) && prevEvent > 0;
+            const isStaleChronology = hasValidTimestamps && incomingEvent < prevEvent;
+            const isSameTimestampConflict = hasValidTimestamps && incomingEvent === prevEvent && orderDoc.delivery?.status && orderDoc.delivery.status !== mapped;
+
             orderDoc.delivery = orderDoc.delivery || {};
-            orderDoc.delivery.status = mapped;
-            orderDoc.delivery.rawStatus = String(srStatus);
-            if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
-            if (Number.isFinite(incomingEvent) && incomingEvent > prevEvent) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
+            orderDoc.shiprocket = orderDoc.shiprocket || {};
             if (normalized.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
             orderDoc.delivery.lastSyncedAt = new Date();
             if (normalized.awb) orderDoc.shiprocket.awbCode = normalized.awb;
             if (normalized.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
             if (normalized.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
+
+            if (isStaleRto || isStaleChronology || isSameTimestampConflict) {
+                console.log(`[Sync] ${orderDoc.orderId} stale/conflicting logistics event ignored (${mapped} @ ${normalized?.eventTime} vs current ${orderDoc.delivery?.status} @ ${orderDoc.delivery?.lastEventAt})`);
+                await orderDoc.save();
+                return;
+            }
+
+            orderDoc.delivery.status = mapped;
+            orderDoc.delivery.rawStatus = String(srStatus);
+            if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
+            if (Number.isFinite(incomingEvent) && incomingEvent > prevEvent) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
             await orderDoc.save();
             console.log(`[Sync] Order ${orderDoc.orderId} logistics '${mapped}' (RTO separate)`);
             return;
