@@ -9,7 +9,29 @@ import shiprocket from "./shiprocket.js";
 import { mapShipmentStatus } from "./shiprocketTracking.js";
 import { syncOrderFromShipment } from "../controllers/orderController.js";
 
-export async function runTrackingSweep(batchLimit = 15) {
+export function buildCanonicalTrackingFromDetail(detail, fallbackShipmentId = null) {
+    if (!detail) return null;
+    const mappedStatus = detail.statusCode != null
+        ? mapShipmentStatus(detail.statusCode, "order")
+        : (detail.status ? mapShipmentStatus(detail.status, "order") : null);
+    return {
+        __canonical: true,
+        eventTime: detail.eventTime || null,
+        etd: detail.etd || null,
+        awb: detail.awb || null,
+        shipmentId: detail.shipmentId || fallbackShipmentId || null,
+        courierName: detail.courier || null,
+        rawStatus: detail.statusCode ?? detail.status ?? null,
+        shipmentStatus: detail.status || null,
+        currentStatus: detail.status || null,
+        mappedStatus,
+        trackUrl: detail.trackUrl || null,
+        activities: [],
+    };
+}
+
+export async function runTrackingSweep(batchLimit = 15, options = {}) {
+    const syncFn = options.syncOrderFromShipment || syncOrderFromShipment;
     // Recovery: confirmed orders WITH Shiprocket evidence (AWB/shipment) were
     // fulfilled but webhook was missed — they must be polled. Confirmed with
     // no identifiers stays untouched.
@@ -35,30 +57,14 @@ export async function runTrackingSweep(batchLimit = 15) {
             } else if (order.shiprocket?.shipmentId) {
                 const detail = await shiprocket.getShipmentDetail(order.shiprocket.shipmentId);
                 if (detail) {
-                    const mappedStatus = detail.statusCode != null
-                        ? mapShipmentStatus(detail.statusCode, "order")
-                        : (detail.status ? mapShipmentStatus(detail.status, "order") : null);
-                    tracking = {
-                        __canonical: true,
-                        eventTime: detail.eventTime || null,
-                        etd: detail.etd || null,
-                        awb: detail.awb || null,
-                        shipmentId: detail.shipmentId || order.shiprocket.shipmentId,
-                        courierName: detail.courier || null,
-                        rawStatus: detail.statusCode ?? detail.status ?? null,
-                        shipmentStatus: detail.status || null,
-                        currentStatus: detail.status || null,
-                        mappedStatus,
-                        trackUrl: detail.trackUrl || null,
-                        activities: [],
-                    };
+                    tracking = buildCanonicalTrackingFromDetail(detail, order.shiprocket.shipmentId);
                 }
             } else if (order.shiprocket?.orderId) {
                 tracking = await shiprocket.trackByShiprocketOrderId(order.shiprocket.orderId);
             }
 
             if (tracking) {
-                await syncOrderFromShipment(order, tracking);
+                await syncFn(order, tracking);
                 synced++;
             }
         } catch (err) {
@@ -70,4 +76,5 @@ export async function runTrackingSweep(batchLimit = 15) {
 
 export default {
     runTrackingSweep,
+    buildCanonicalTrackingFromDetail,
 };
