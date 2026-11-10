@@ -8,6 +8,9 @@
  *   SHIPROCKET_PICKUP_LOCATION  (default: "Primary")
  */
 
+import { parseShiprocketDate } from "./shiprocketTracking.js";
+export { parseShiprocketDate };
+
 let cachedToken = null;
 let tokenExpiry = null;
 
@@ -474,8 +477,13 @@ export function normalizeShipmentDetail(raw) {
         statusCode: statusCode ?? shipment.status_code ?? shipment.status_id,
     });
 
-    const eventTime = tracking?.current_timestamp ?? tracking?.date ?? tracking?.shipment_track_date ?? data.current_timestamp ?? shipment.current_timestamp ?? null;
-    const etd = tracking?.etd ?? tracking?.expected_date ?? tracking?.edd ?? data.etd ?? shipment.etd ?? shipment.expected_date ?? shipment.edd ?? null;
+    const rawEventTime = tracking?.current_timestamp ?? tracking?.date ?? tracking?.shipment_track_date ?? data.current_timestamp ?? shipment.current_timestamp ?? null;
+    const parsedEvent = parseShiprocketDate(rawEventTime);
+    const eventTime = parsedEvent ? parsedEvent.toISOString() : null;
+
+    const rawEtd = tracking?.etd ?? tracking?.expected_date ?? tracking?.edd ?? data.etd ?? shipment.etd ?? shipment.expected_date ?? shipment.edd ?? null;
+    const parsedEtd = parseShiprocketDate(rawEtd);
+    const etd = parsedEtd ? parsedEtd.toISOString() : null;
     const trackUrl = tracking?.track_url ?? data.track_url ?? shipment.track_url ?? null;
 
     return {
@@ -669,6 +677,7 @@ export default {
     cancelShiprocketOrder,
     classifyShiprocketCancelResponse,
     generatePickup,
+    parseShiprocketDate,
     getShipmentDetail,
     normalizeShipmentDetail,
     isPickupAlreadyEstablished,

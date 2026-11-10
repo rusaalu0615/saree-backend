@@ -34,8 +34,8 @@ test("Webhook-shaped payload normalization", () => {
   assert.equal(n.awb, "TEST-AWB-123");
   assert.equal(n.courierName, "Test Courier");
   assert.equal(String(n.rawStatus), "18");
-  assert.equal(n.eventTime, "2026-11-09 12:00:00");
-  assert.equal(n.etd, "2026-11-12");
+  assert.equal(n.eventTime, "2026-11-09T06:30:00.000Z");
+  assert.equal(n.etd, "2026-11-11T18:30:00.000Z");
   assert.notEqual(n.eventTime, n.etd);
 });
 

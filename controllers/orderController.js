@@ -7,7 +7,7 @@ import User from "../models/userModal.js";
 import Coupon from "../models/couponModal.js";
 import WebhookEvent from "../models/webhookEventModel.js";
 import EmailJob from "../models/emailJobModel.js";
-import shiprocket, { isPickupAlreadyEstablished } from "../services/shiprocket.js";
+import shiprocket, { isPickupAlreadyEstablished, parseShiprocketDate } from "../services/shiprocket.js";
 import emailService from "../services/emailService.js";
 import invoiceService from "../services/invoiceService.js";
 import AppError from "../utils/AppError.js";
@@ -1603,7 +1603,8 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             const existingRank = RTO_RANK[orderDoc.delivery?.status] ?? -1;
             const incomingRank = RTO_RANK[mapped] ?? -1;
             const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
-            const incomingEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : 0;
+            const incomingEventDate = parseShiprocketDate(normalized?.eventTime);
+            const incomingEvent = incomingEventDate ? incomingEventDate.getTime() : 0;
 
             const isStaleRto = existingRank !== -1 && incomingRank !== -1 && incomingRank < existingRank;
             const hasValidTimestamps = Number.isFinite(incomingEvent) && incomingEvent > 0 && Number.isFinite(prevEvent) && prevEvent > 0;
@@ -1613,7 +1614,7 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
 
             orderDoc.delivery = orderDoc.delivery || {};
             orderDoc.shiprocket = orderDoc.shiprocket || {};
-            if (normalized.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
+            if (normalized.etd) { const d = parseShiprocketDate(normalized.etd); if (d) orderDoc.delivery.expectedDeliveryAt = d; }
             orderDoc.delivery.lastSyncedAt = new Date();
             if (normalized.awb) orderDoc.shiprocket.awbCode = normalized.awb;
             if (normalized.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
@@ -1628,7 +1629,7 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             orderDoc.delivery.status = mapped;
             orderDoc.delivery.rawStatus = String(srStatus);
             if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
-            if (Number.isFinite(incomingEvent) && incomingEvent > prevEvent) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
+            if (Number.isFinite(incomingEvent) && incomingEvent > prevEvent && incomingEventDate) orderDoc.delivery.lastEventAt = incomingEventDate;
             await orderDoc.save();
             console.log(`[Sync] Order ${orderDoc.orderId} logistics '${mapped}' (RTO separate)`);
             return;
@@ -1651,10 +1652,11 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             // Metadata refresh is independent of chronology: persist ETD/URL/AWB
             // always; advance lastEventAt only when event time is newer.
             const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
-            const nextEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : Number.NaN;
+            const nextEventDate = parseShiprocketDate(normalized?.eventTime);
+            const nextEvent = nextEventDate ? nextEventDate.getTime() : Number.NaN;
             orderDoc.delivery = orderDoc.delivery || {};
-            if (Number.isFinite(nextEvent) && nextEvent > prevEvent) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
-            if (normalized?.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
+            if (Number.isFinite(nextEvent) && nextEvent > prevEvent && nextEventDate) orderDoc.delivery.lastEventAt = nextEventDate;
+            if (normalized?.etd) { const d = parseShiprocketDate(normalized.etd); if (d) orderDoc.delivery.expectedDeliveryAt = d; }
             orderDoc.delivery.lastSyncedAt = new Date();
             if (normalized?.awb) orderDoc.shiprocket.awbCode = normalized.awb;
             if (normalized?.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
@@ -1668,9 +1670,10 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
         orderDoc.delivery.rawStatus = String(srStatus);
         if (normalized.rawStatus !== null && normalized.rawStatus !== undefined) orderDoc.delivery.rawStatusCode = String(normalized.rawStatus);
         const prevEvent = orderDoc.delivery?.lastEventAt ? new Date(orderDoc.delivery.lastEventAt).getTime() : 0;
-        const incomingEvent = normalized?.eventTime ? new Date(normalized.eventTime).getTime() : 0;
-        if (Number.isFinite(incomingEvent) && incomingEvent > prevEvent) orderDoc.delivery.lastEventAt = new Date(normalized.eventTime);
-        if (normalized.etd) { const d = new Date(normalized.etd); if (!Number.isNaN(d.getTime())) orderDoc.delivery.expectedDeliveryAt = d; }
+        const incomingEventDate = parseShiprocketDate(normalized?.eventTime);
+        const incomingEvent = incomingEventDate ? incomingEventDate.getTime() : 0;
+        if (Number.isFinite(incomingEvent) && incomingEvent > prevEvent && incomingEventDate) orderDoc.delivery.lastEventAt = incomingEventDate;
+        if (normalized.etd) { const d = parseShiprocketDate(normalized.etd); if (d) orderDoc.delivery.expectedDeliveryAt = d; }
         if (normalized.awb) orderDoc.shiprocket.awbCode = normalized.awb;
         if (normalized.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
         if (normalized.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
