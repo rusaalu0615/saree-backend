@@ -56,3 +56,33 @@ test("idempotency: pickup_requested/complete short-circuits pickup stage", async
   assert.match(src, /courier_assigned.*pickup_pending/);
   assert.match(src, /stageGeneratePickup/);
 });
+
+test("pickupGeneratedAt and pickupScheduledAt remain distinct in shipment detail normalization", () => {
+  const g = "2026-11-09 10:00:00";
+  const s = "2026-11-09 14:00:00";
+  const detail = normalizeShipmentDetail({
+    shipment: {
+      id: 1712718895,
+      status: 2,
+      pickup_generated_date: g,
+      pickup_scheduled_date: s,
+    },
+  });
+
+  assert.equal(detail.pickupGeneratedAt, g);
+  assert.equal(detail.pickupScheduledAt, s);
+  assert.notEqual(detail.pickupGeneratedAt, detail.pickupScheduledAt);
+  assert.equal(detail.confirmed, true, "pickupGeneratedAt confirms pickup");
+
+  // Scheduled date alone also confirms pickup
+  const schedOnly = normalizeShipmentDetail({
+    shipment: {
+      id: 1712718895,
+      status: 2,
+      pickup_scheduled_date: s,
+    },
+  });
+  assert.equal(schedOnly.pickupGeneratedAt, null);
+  assert.equal(schedOnly.pickupScheduledAt, s);
+  assert.equal(schedOnly.confirmed, true, "pickupScheduledAt confirms pickup");
+});

@@ -156,3 +156,64 @@ test("Test D: Duplicate same state refreshes safe metadata without duplicate sid
     assert.ok(order.saveCount >= 1);
 });
 
+test("Test E: Undated ambiguous special event cannot regress established advanced RTO state (rto_delivered stays rto_delivered)", async () => {
+    const t2 = "2026-11-10T16:00:00.000Z";
+
+    const order = makeMockOrder({
+        deliveryStatus: "rto_delivered",
+        lastEventAt: t2,
+        rawStatus: "RTO Delivered",
+        rawStatusCode: "20",
+        awbCode: "AWB-OLD",
+    });
+
+    const undatedDamagedPayload = {
+        __canonical: true,
+        mappedStatus: "damaged",
+        currentStatus: "Damaged",
+        eventTime: null,
+        rawStatus: 38,
+        awb: "AWB-UNDATED-REFRESH",
+        courierName: "Delhivery",
+    };
+
+    await syncOrderFromShipment(order, undatedDamagedPayload);
+
+    // Delivery status and lastEventAt must NOT be overwritten by ambiguous undated event
+    assert.equal(order.delivery.status, "rto_delivered");
+    assert.equal(order.delivery.lastEventAt.toISOString(), t2);
+    // Safe metadata must still refresh
+    assert.equal(order.shiprocket.awbCode, "AWB-UNDATED-REFRESH");
+    assert.equal(order.shiprocket.courierName, "Delhivery");
+    assert.ok(order.delivery.lastSyncedAt instanceof Date);
+    assert.ok(order.saveCount >= 1);
+});
+
+test("Test F: Legitimate undated exceptional event on standard forward state is accepted (in_transit updates to damaged without moving lastEventAt)", async () => {
+    const t1 = "2026-11-10T10:00:00.000Z";
+
+    const order = makeMockOrder({
+        deliveryStatus: "in_transit",
+        lastEventAt: t1,
+        rawStatus: "In Transit",
+        rawStatusCode: "18",
+    });
+
+    const undatedDamagedPayload = {
+        __canonical: true,
+        mappedStatus: "damaged",
+        currentStatus: "Damaged",
+        eventTime: null,
+        rawStatus: 38,
+    };
+
+    await syncOrderFromShipment(order, undatedDamagedPayload);
+
+    // Delivery status is legitimately updated to damaged
+    assert.equal(order.delivery.status, "damaged");
+    // lastEventAt does NOT move backward or forward since eventTime is null
+    assert.equal(order.delivery.lastEventAt.toISOString(), t1);
+    assert.equal(order.delivery.rawStatus, "Damaged");
+    assert.ok(order.saveCount >= 1);
+});
+

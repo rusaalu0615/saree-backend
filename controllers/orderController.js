@@ -1536,6 +1536,35 @@ async function pushToShiprocket(order) {
 export { normalizeTrackingResult, sanitizeTrackingForPublic, mapShipmentStatus, STATUS_RANK };
 
 /**
+ * Determines whether an undated (eventTime is missing or null) special logistics event
+ * is safe to apply to the order's delivery.status without regressing an established state.
+ */
+export function isSafeUndatedSpecialTransition(currentDeliveryStatus, incomingMappedStatus) {
+    if (!currentDeliveryStatus || currentDeliveryStatus === incomingMappedStatus) {
+        return true;
+    }
+    // Established RTO progression states and terminal exception states:
+    const ESTABLISHED_SPECIAL_STATES = new Set([
+        "undelivered",
+        "rto_initiated",
+        "rto_in_transit",
+        "rto_out_for_delivery",
+        "rto_delivered",
+        "lost",
+        "damaged",
+        "cancelled",
+    ]);
+    // If the order has already reached an established RTO or terminal exception state,
+    // an undated snapshot cannot overwrite it.
+    if (ESTABLISHED_SPECIAL_STATES.has(currentDeliveryStatus)) {
+        return false;
+    }
+    // Standard forward progression states (pending, picked_up, shipped, in_transit, out_for_delivery)
+    // can legitimately accept an undated exception (e.g. current snapshot reporting damaged).
+    return true;
+}
+
+/**
  * Forward-only status sync from a Shiprocket tracking payload. Advances the
  * stored order, records the timeline entry and emails the customer when the
  * courier reports a genuinely newer stage. Never downgrades; never touches
@@ -1569,6 +1598,7 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             const hasValidTimestamps = Number.isFinite(incomingEvent) && incomingEvent > 0 && Number.isFinite(prevEvent) && prevEvent > 0;
             const isStaleChronology = hasValidTimestamps && incomingEvent < prevEvent;
             const isSameTimestampConflict = hasValidTimestamps && incomingEvent === prevEvent && orderDoc.delivery?.status && orderDoc.delivery.status !== mapped;
+            const isUndatedRegression = (!incomingEvent || !Number.isFinite(incomingEvent) || incomingEvent <= 0) && Number.isFinite(prevEvent) && prevEvent > 0 && !isSafeUndatedSpecialTransition(orderDoc.delivery?.status, mapped);
 
             orderDoc.delivery = orderDoc.delivery || {};
             orderDoc.shiprocket = orderDoc.shiprocket || {};
@@ -1578,8 +1608,8 @@ export async function syncOrderFromShipment(orderDoc, trackingPayload) {
             if (normalized.courierName) orderDoc.shiprocket.courierName = normalized.courierName;
             if (normalized.trackUrl) orderDoc.shiprocket.trackingUrl = normalized.trackUrl;
 
-            if (isStaleRto || isStaleChronology || isSameTimestampConflict) {
-                console.log(`[Sync] ${orderDoc.orderId} stale/conflicting logistics event ignored (${mapped} @ ${normalized?.eventTime} vs current ${orderDoc.delivery?.status} @ ${orderDoc.delivery?.lastEventAt})`);
+            if (isStaleRto || isStaleChronology || isSameTimestampConflict || isUndatedRegression) {
+                console.log(`[Sync] ${orderDoc.orderId} stale/conflicting/undated logistics event ignored (${mapped} @ ${normalized?.eventTime} vs current ${orderDoc.delivery?.status} @ ${orderDoc.delivery?.lastEventAt})`);
                 await orderDoc.save();
                 return;
             }
