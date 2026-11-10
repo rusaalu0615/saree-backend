@@ -164,7 +164,7 @@ test("6. complete: idempotently bypasses pickup generation and stageComplete", a
   }
 });
 
-test("7. local stage = pickup_pending + shipment status 19 Out For Pickup: no retry, leaves pickup_pending and clears errors", async () => {
+test("7. pickup_pending + Out For Pickup self-heals to complete without retry", async () => {
   const { getStage, getOrder, cleanup } = setupMock("pickup_pending");
   try {
     let generatePickupCalled = false;
@@ -284,6 +284,7 @@ test("11. later forward state statusCode = 18 In Transit with stale pickup_pendi
 
 test("12. tracking/webhook event with status 19 Out For Pickup self-heals stale fulfillment stage in syncOrderFromShipment", async () => {
   const { syncOrderFromShipment } = await import("../controllers/orderController.js");
+  const oldConfirmedAt = new Date("2026-11-09T10:00:00.000Z");
   const mockOrderDoc = {
     orderId: "LS-TRACK-HEAL-1",
     status: "processing",
@@ -291,6 +292,7 @@ test("12. tracking/webhook event with status 19 Out For Pickup self-heals stale 
     shiprocket: { status: "OLD" },
     fulfillment: {
       stage: "pickup_pending",
+      stageConfirmedAt: oldConfirmedAt,
       lastError: "Invalid Status for pickup generation",
       nextAttemptAt: new Date(),
     },
@@ -310,6 +312,8 @@ test("12. tracking/webhook event with status 19 Out For Pickup self-heals stale 
   });
 
   assert.equal(mockOrderDoc.fulfillment.stage, "complete");
+  assert.ok(mockOrderDoc.fulfillment.stageConfirmedAt instanceof Date);
+  assert.ok(mockOrderDoc.fulfillment.stageConfirmedAt > oldConfirmedAt);
   assert.equal(mockOrderDoc.fulfillment.lastError, null);
   assert.equal(mockOrderDoc.fulfillment.nextAttemptAt, null);
   assert.equal(mockOrderDoc.status, "processing", "Customer status must NOT falsely advance to delivered or picked_up");
