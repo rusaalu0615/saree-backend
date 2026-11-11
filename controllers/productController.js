@@ -24,7 +24,7 @@ const addProduct = async (req, res) => {
             shortDescription, tags, color,
             material, sareeSize, blouseSize, washCare, dispatch,
             disclaimer, internationalNote, videoUrl,
-            isOnSale, isNewArrival, productCollection,
+            isOnSale, isNewArrival, isFeatured, isBestSeller, productCollection,
             galleryImageInfos: galleryImageInfosRaw,
         } = req.body;
 
@@ -107,6 +107,8 @@ const addProduct = async (req, res) => {
             isFestive: productCollection === "festive",
             isOnSale: (isOnSale === "true" || isOnSale === true) || productCollection === "big-sale",
             isNewArrival: isNewArrival === "true" || isNewArrival === true,
+            isFeatured: isFeatured === "true" || isFeatured === true,
+            isBestSeller: isBestSeller === "true" || isBestSeller === true,
             productCollection: productCollection || "none",
         });
 
@@ -140,16 +142,27 @@ const getAllProducts = async (req, res) => {
         const { 
             search, q, category, color, material, 
             priceMin, priceMax, isOnSale, isFestive, isNewArrival,
+            isFeatured, isBestSeller, hasVideo,
             productCollection, collection,
             sortBy, page, limit, fullData 
         } = req.query;
 
         const searchQuery = search || q;
         const andConditions = [];
+        let isTextSearch = false;
         
         // 1. Text Search
+        // 1. Text Search (Exact SKU Match Priority)
         if (searchQuery) {
             andConditions.push({ $text: { $search: searchQuery } });
+            const trimmedQuery = searchQuery.trim();
+            const skuExists = await productModal.exists({ sku: new RegExp(`^${escapeRegex(trimmedQuery)}$`, "i") });
+            if (skuExists) {
+                andConditions.push({ sku: new RegExp(`^${escapeRegex(trimmedQuery)}$`, "i") });
+            } else {
+                andConditions.push({ $text: { $search: searchQuery } });
+                isTextSearch = true;
+            }
         }
 
         // 2. Exact Match Filters (OR within the same attribute group, AND across independent groups)
@@ -206,6 +219,32 @@ const getAllProducts = async (req, res) => {
             andConditions.push({ isNewArrival: isNewArrival === "true" || isNewArrival === true });
         }
 
+        if (isFeatured !== undefined) {
+            andConditions.push({ isFeatured: isFeatured === "true" || isFeatured === true });
+        }
+
+        if (isBestSeller !== undefined) {
+            andConditions.push({ isBestSeller: isBestSeller === "true" || isBestSeller === true });
+        }
+
+        if (hasVideo !== undefined) {
+            if (hasVideo === "true" || hasVideo === true) {
+                andConditions.push({
+                    $or: [
+                        { videoUrl: { $exists: true, $ne: "", $nin: [null, ""] } },
+                        { videoFile: { $exists: true, $ne: "", $nin: [null, ""] } }
+                    ]
+                });
+            } else {
+                andConditions.push({
+                    $and: [
+                        { $or: [{ videoUrl: { $exists: false } }, { videoUrl: "" }, { videoUrl: null }] },
+                        { $or: [{ videoFile: { $exists: false } }, { videoFile: "" }, { videoFile: null }] }
+                    ]
+                });
+            }
+        }
+
         // 3. Price Range Filter
         if (priceMin || priceMax) {
             const priceFilter = {};
@@ -217,7 +256,7 @@ const getAllProducts = async (req, res) => {
         const filter = andConditions.length > 0 ? { $and: andConditions } : {};
 
         // 4. Projection (Exclude heavy fields for lists unless fullData is true)
-        const projection = searchQuery ? { score: { $meta: "textScore" } } : {};
+        const projection = isTextSearch ? { score: { $meta: "textScore" } } : {};
         if (fullData !== "true") {
             // Include only what's needed for ProductCards
             Object.assign(projection, {
@@ -234,10 +273,21 @@ const getAllProducts = async (req, res) => {
 
         // 5. Sorting
         let sort = {};
-        if (searchQuery && !sortBy) {
+        if (isTextSearch && !sortBy) {
             sort = { score: { $meta: "textScore" } };
         } else {
             switch (sortBy) {
+                case 'featured':
+                    sort = { isFeatured: -1, isNewArrival: -1, createdAt: -1 };
+                    break;
+                case 'color-asc':
+                    sort.color = 1;
+                    sort.createdAt = -1;
+                    break;
+                case 'color-desc':
+                    sort.color = -1;
+                    sort.createdAt = -1;
+                    break;
                 case 'price-low':
                     sort.price = 1; break;
                 case 'price-high':
@@ -441,7 +491,7 @@ const updateProduct = async (req, res) => {
             shortDescription, tags, color,
             material, sareeSize, blouseSize, washCare, dispatch,
             disclaimer, internationalNote, videoUrl,
-            isOnSale, isNewArrival, productCollection,
+            isOnSale, isNewArrival, isFeatured, isBestSeller, productCollection,
             removeVideo,
             galleryImageInfos: galleryImageInfosRaw,
             existingGalleryImages: existingGalleryImagesRaw,
@@ -472,6 +522,12 @@ const updateProduct = async (req, res) => {
         // Handle boolean flags explicitly
         if (isNewArrival !== undefined) {
             updateData.isNewArrival = isNewArrival === "true" || isNewArrival === true;
+        }
+        if (isFeatured !== undefined) {
+            updateData.isFeatured = isFeatured === "true" || isFeatured === true;
+        }
+        if (isBestSeller !== undefined) {
+            updateData.isBestSeller = isBestSeller === "true" || isBestSeller === true;
         }
 
         // Handle isOnSale — respect explicit value first
@@ -746,6 +802,7 @@ const QUICK_UPDATE_ALLOWED_FIELDS = [
     "shortDescription", "tags", "color", "material", "sareeSize",
     "blouseSize", "washCare", "dispatch", "disclaimer", "internationalNote",
     "videoUrl", "isOnSale", "isNewArrival", "isFestive", "productCollection",
+    "videoUrl", "isOnSale", "isNewArrival", "isFestive", "isFeatured", "isBestSeller", "productCollection",
 ];
 
 const quickUpdateProduct = async (req, res) => {
@@ -792,6 +849,14 @@ const quickUpdateProduct = async (req, res) => {
                 });
             }
             updates.stock = s;
+        }
+
+        if (updates.isFeatured !== undefined) {
+            updates.isFeatured = updates.isFeatured === "true" || updates.isFeatured === true;
+        }
+
+        if (updates.isBestSeller !== undefined) {
+            updates.isBestSeller = updates.isBestSeller === "true" || updates.isBestSeller === true;
         }
 
         // Synchronize collection and boolean flags
@@ -855,16 +920,232 @@ const quickUpdateProduct = async (req, res) => {
     }
 };
 
+const getProductBySlug = async (req, res) => {
+    if (typeof res.setHeader === "function") {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    }
+    try {
+        const rawSlug = decodeURIComponent(req.params.slug || "").trim();
+        let product = null;
+
+        // 1. Direct SKU match (e.g. if slug is the SKU)
+        product = await productModal.findOne({ sku: new RegExp(`^${escapeRegex(rawSlug)}$`, 'i') }).lean();
+
+        // 2. Try candidate SKU suffixes if slug contains hyphens
+        if (!product && rawSlug.includes('-')) {
+            const parts = rawSlug.split('-');
+            for (let segs = 1; segs < parts.length && segs <= 6; segs++) {
+                const candidateSku = parts.slice(parts.length - segs).join('-');
+                product = await productModal.findOne({ sku: new RegExp(`^${escapeRegex(candidateSku)}$`, 'i') }).lean();
+                if (product) break;
+            }
+        }
+
+        // 3. Fallback: match by name dash pattern (legacy URLs)
+        if (!product) {
+            const pattern = dashPattern(rawSlug);
+            product = await productModal.findOne({ name: new RegExp(`^${pattern}$`, 'i') }).lean();
+        }
+
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found",
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            product,
+        });
+    } catch (error) {
+        console.error("getProductBySlug error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Internal server error: " + (error.message || error),
+        });
+    }
+};
+
 const getFilters = async (req, res) => {
     try {
         const colors = await productModal.distinct("color");
         const materials = await productModal.distinct("material");
+        const { category, search, q, productCollection, collection, isOnSale, isFestive, isNewArrival, isFeatured, isBestSeller } = req.query;
+        const andConditions = [];
+        const searchQuery = search || q;
+        if (searchQuery) {
+            const trimmed = searchQuery.trim();
+            const skuExists = await productModal.exists({ sku: new RegExp(`^${escapeRegex(trimmed)}$`, "i") });
+            if (skuExists) {
+                andConditions.push({ sku: new RegExp(`^${escapeRegex(trimmed)}$`, "i") });
+            } else {
+                andConditions.push({ $text: { $search: searchQuery } });
+            }
+        }
+        if (category) {
+            const regexList = category
+                .split(',')
+                .slice(0, MAX_FILTER_TOKENS)
+                .map(c => new RegExp(`^${dashPattern(c)}$`, "i"));
+            andConditions.push({ category: { $in: regexList } });
+        }
+        const targetCollection = productCollection || collection;
+        if (targetCollection) {
+            if (targetCollection === "festive") {
+                andConditions.push({ $or: [{ isFestive: true }, { productCollection: "festive" }] });
+            } else if (targetCollection === "big-sale" || targetCollection === "sale") {
+                andConditions.push({ $or: [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }] });
+            } else {
+                andConditions.push({ productCollection: targetCollection });
+            }
+        }
+        if (isOnSale !== undefined) {
+            if (isOnSale === "true" || isOnSale === true) {
+                andConditions.push({ $or: [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }] });
+            } else {
+                andConditions.push({ isOnSale: false });
+            }
+        }
+        if (isFestive !== undefined) {
+            if (isFestive === "true" || isFestive === true) {
+                andConditions.push({ $or: [{ isFestive: true }, { productCollection: "festive" }] });
+            } else {
+                andConditions.push({ isFestive: false });
+            }
+        }
+        if (isNewArrival !== undefined) {
+            andConditions.push({ isNewArrival: isNewArrival === "true" || isNewArrival === true });
+        }
+        if (isFeatured !== undefined) {
+            andConditions.push({ isFeatured: isFeatured === "true" || isFeatured === true });
+        }
+        if (isBestSeller !== undefined) {
+            andConditions.push({ isBestSeller: isBestSeller === "true" || isBestSeller === true });
+        }
+
+        const matchStage = andConditions.length > 0 ? { $match: { $and: andConditions } } : { $match: {} };
+
+        const facetResults = await productModal.aggregate([
+            matchStage,
+            {
+                $facet: {
+                    colors: [
+                        { $match: { color: { $exists: true, $ne: null, $nin: ["", null] } } },
+                        { $group: { _id: "$color", count: { $sum: 1 } } },
+                        { $sort: { _id: 1 } }
+                    ],
+                    materials: [
+                        { $match: { material: { $exists: true, $ne: null, $nin: ["", null] } } },
+                        { $group: { _id: "$material", count: { $sum: 1 } } },
+                        { $sort: { _id: 1 } }
+                    ],
+                    categories: [
+                        { $match: { category: { $exists: true, $ne: null, $nin: ["", null] } } },
+                        { $group: { _id: "$category", count: { $sum: 1 } } },
+                        { $sort: { _id: 1 } }
+                    ],
+                    priceStats: [
+                        { $group: { _id: null, min: { $min: "$price" }, max: { $max: "$price" }, count: { $sum: 1 } } }
+                    ]
+                }
+            }
+        ]);
+
+        const facets = facetResults[0] || {};
+        const colorCounts = {};
+        const colorsList = [];
+        (facets.colors || []).forEach(c => {
+            if (c._id) {
+                colorCounts[c._id] = c.count;
+                colorsList.push(c._id);
+            }
+        });
+
+        const materialCounts = {};
+        const materialsList = [];
+        (facets.materials || []).forEach(m => {
+            if (m._id) {
+                materialCounts[m._id] = m.count;
+                materialsList.push(m._id);
+            }
+        });
+
+        const categoryCounts = {};
+        const categoriesList = [];
+        (facets.categories || []).forEach(cat => {
+            if (cat._id) {
+                categoryCounts[cat._id] = cat.count;
+                categoriesList.push(cat._id);
+            }
+        });
+
+        const priceStat = facets.priceStats?.[0];
+        const priceRange = {
+            min: priceStat?.min ?? 0,
+            max: priceStat?.max ?? 10000,
+        };
+
         res.status(200).json({
             success: true,
-            colors: colors.filter(Boolean),
-            materials: materials.filter(Boolean)
+            colors: colorsList,
+            materials: materialsList,
+            categories: categoriesList,
+            counts: {
+                colors: colorCounts,
+                fabrics: materialCounts,
+                categories: categoryCounts,
+            },
+            priceRange,
         });
     } catch (error) {
+        console.error("getFilters error:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+const getAdminMediaLibrary = async (req, res) => {
+    if (typeof res.setHeader === "function") {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    }
+    try {
+        const pageNum = Math.max(1, parseInt(req.query.page) || 1);
+        const limitNum = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+        const skipNum = (pageNum - 1) * limitNum;
+        const search = (req.query.search || "").trim();
+
+        const filter = {};
+        if (search) {
+            filter.$or = [
+                { name: new RegExp(escapeRegex(search), "i") },
+                { sku: new RegExp(escapeRegex(search), "i") },
+            ];
+        }
+
+        const [products, totalProducts] = await Promise.all([
+            productModal.find(
+                filter,
+                { _id: 1, name: 1, sku: 1, mainImage: 1, mainImageInfo: 1, galleryImages: 1 }
+            )
+                .sort({ createdAt: -1 })
+                .skip(skipNum)
+                .limit(limitNum)
+                .lean(),
+            productModal.countDocuments(filter),
+        ]);
+
+        res.status(200).json({
+            success: true,
+            products,
+            pagination: {
+                currentPage: pageNum,
+                totalPages: Math.max(1, Math.ceil(totalProducts / limitNum)),
+                totalProducts,
+                limit: limitNum,
+            },
+        });
+    } catch (error) {
+        console.error("getAdminMediaLibrary error:", error);
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -986,4 +1267,4 @@ const getProductCardsByIds = async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
-export default { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations, getProductCardsByIds };
+export default { addProduct, getAllProducts, getProductById, getProductBySku, getProductBySlug, getAdminMediaLibrary, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations, getProductCardsByIds };

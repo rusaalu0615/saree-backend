@@ -167,6 +167,8 @@ export const createReviewSchema = z.object({
         .trim()
         .min(1, "Comment is required"),
     title: z.string().trim().optional(),
+    name: z.string().trim().optional(),
+    email: z.string().trim().optional(),
 });
 
 // ── Products (multipart; mirrors addProduct's required-field guard) ───
@@ -205,6 +207,8 @@ export const addProductSchema = z.object({
         .string({ error: "Wash care is required" })
         .trim()
         .min(1, "Wash care is required"),
+    isFeatured: z.any().optional(),
+    isBestSeller: z.any().optional(),
 });
 
 // ── Admin content (multipart; mirrors each controller's required text fields) ──

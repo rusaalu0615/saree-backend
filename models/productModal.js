@@ -119,6 +119,14 @@ const productSchema = new mongoose.Schema({
         type: Boolean,
         default: false,
     },
+    isFeatured: {
+        type: Boolean,
+        default: false,
+    },
+    isBestSeller: {
+        type: Boolean,
+        default: false,
+    },
     productCollection: {
         type: String,
         default: "",
@@ -169,6 +177,8 @@ productSchema.index({ isNewArrival: 1 });
 productSchema.index({ productCollection: 1, createdAt: -1 });
 productSchema.index({ isNewArrival: 1, createdAt: -1 });
 productSchema.index({ isOnSale: 1, createdAt: -1 });
+productSchema.index({ isFeatured: 1, createdAt: -1 });
+productSchema.index({ isBestSeller: 1, createdAt: -1 });
 productSchema.index({ material: 1, createdAt: -1 });
 productSchema.index({ color: 1, createdAt: -1 });
 productSchema.index({ price: 1, createdAt: -1 });

@@ -4,7 +4,17 @@ const reviewSchema = new mongoose.Schema({
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",
-        required: true,
+        required: false,
+    },
+    userName: {
+        type: String,
+        trim: true,
+        default: "Anonymous",
+    },
+    userEmail: {
+        type: String,
+        trim: true,
+        lowercase: true,
     },
     product: {
         type: mongoose.Schema.Types.ObjectId,
@@ -29,9 +39,20 @@ const reviewSchema = new mongoose.Schema({
     photos: [{
         type: String,
     }],
+    isApproved: {
+        type: Boolean,
+        default: true,
+        index: true,
+    },
+    status: {
+        type: String,
+        enum: ["pending", "approved", "rejected"],
+        default: "approved",
+        index: true,
+    },
 }, { timestamps: true });
 
 // Prevent a user from submitting more than one review per product
-reviewSchema.index({ user: 1, product: 1 }, { unique: true });
+reviewSchema.index({ user: 1, product: 1 }, { unique: true, sparse: true });
 
 export default mongoose.model("Review", reviewSchema);
