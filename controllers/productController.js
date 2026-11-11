@@ -1172,7 +1172,7 @@ const getRecommendations = async (req, res) => {
         if (!current) {
             return res.status(404).json({ success: false, message: "Product not found" });
         }
-        const limit = Math.min(Math.max(parseInt(req.query.limit) || 8, 1), 12);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 24);
         let cursorOffset = 0;
         try {
             if (req.query.cursor) {
