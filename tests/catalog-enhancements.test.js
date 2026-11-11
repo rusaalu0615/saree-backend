@@ -217,4 +217,96 @@ describe("Catalog Enhancements & Data Retrieval Suite", () => {
         assert.ok(sample.sku);
         assert.ok(sample.mainImage);
     });
+
+    test("9. getAllProducts returns galleryImages with url but excludes heavy metadata, while getProductById returns full metadata", async () => {
+        const reqList = { query: { search: p1.sku, limit: "1" } };
+        const resList = mockRes();
+        await productController.getAllProducts(reqList, resList);
+
+        assert.equal(resList.statusCode, 200);
+        const listProduct = resList.body.products[0];
+        assert.ok(listProduct);
+        assert.equal(listProduct.mainImage, "https://example.com/p1-main.jpg");
+        assert.ok(Array.isArray(listProduct.galleryImages));
+        assert.equal(listProduct.galleryImages.length, 1);
+        assert.equal(listProduct.galleryImages[0].url, "https://example.com/p1-g1.jpg");
+        assert.equal(listProduct.galleryImages[0].title, undefined);
+        assert.equal(listProduct.galleryImages[0].description, undefined);
+
+        const reqDetail = { params: { id: p1._id.toString() } };
+        const resDetail = mockRes();
+        await productController.getProductById(reqDetail, resDetail);
+        assert.equal(resDetail.statusCode, 200);
+        const detailProduct = resDetail.body.product;
+        assert.ok(detailProduct);
+        assert.equal(detailProduct.galleryImages[0].url, "https://example.com/p1-g1.jpg");
+    });
+
+    test("10. getRecommendations does not throw due to seen initialization and excludes current product", async () => {
+        const req = {
+            params: { productId: p1._id.toString() },
+            query: { limit: "8" }
+        };
+        const res = mockRes();
+        await productController.getRecommendations(req, res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.body.success, true);
+        assert.ok(Array.isArray(res.body.products));
+        assert.ok(res.body.products.length > 0);
+        // Current product must be strictly excluded
+        assert.ok(!res.body.products.some(p => p._id.toString() === p1._id.toString()));
+        assert.equal(typeof res.body.hasMore, "boolean");
+
+        // Verify lightweight card structure
+        const first = res.body.products[0];
+        assert.ok(first._id);
+        assert.ok(first.name);
+        assert.ok(first.sku);
+        assert.ok(first.category);
+        assert.equal(typeof first.price, "number");
+        assert.ok(first.mainImage);
+    });
+
+    test("11. getRecommendations broad fallback returns products when no category/material/color/new/sale matches exist", async () => {
+        const suffix = Date.now().toString().slice(-6);
+        const pIsolated = await Product.create({
+            name: `Exotic Saree ${suffix}`,
+            sku: `EXO-${suffix}-CYN`,
+            category: "exotic-unique-category",
+            material: "Rare Space Fiber",
+            color: "Neon Cyan",
+            price: 99999,
+            regularPrice: 99999,
+            stock: 2,
+            mainImage: "https://example.com/p-iso.jpg",
+            galleryImages: [],
+            isNewArrival: false,
+            isOnSale: false,
+            isFeatured: false,
+            isBestSeller: false,
+            productCollection: "none",
+            shortDescription: "An isolated product with no attributes in common",
+            tags: "exotic, rare",
+            sareeSize: "5.5m",
+            blouseSize: "0.8m",
+            washCare: "Special",
+        });
+        createdProductIds.push(pIsolated._id);
+
+        const req = {
+            params: { productId: pIsolated._id.toString() },
+            query: { limit: "4" }
+        };
+        const res = mockRes();
+        await productController.getRecommendations(req, res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.body.success, true);
+        assert.ok(Array.isArray(res.body.products));
+        // Broad fallback stage ({}) must return existing products (p1, p2, p3, etc.)
+        assert.ok(res.body.products.length > 0, "Broad fallback must return products");
+        // Must exclude the isolated current product
+        assert.ok(!res.body.products.some(p => p._id.toString() === pIsolated._id.toString()));
+    });
 });

@@ -258,7 +258,9 @@ const getAllProducts = async (req, res) => {
         // 4. Projection (Exclude heavy fields for lists unless fullData is true)
         const projection = isTextSearch ? { score: { $meta: "textScore" } } : {};
         if (fullData !== "true") {
-            // Include only what's needed for ProductCards
+            // Include only what's needed for ProductCards:
+            // lightweight product fields + mainImage + all gallery image URLs
+            // (excluding heavy image metadata like title, description, caption, tags)
             Object.assign(projection, {
                 shortDescription: 0,
                 details: 0,
@@ -268,6 +270,11 @@ const getAllProducts = async (req, res) => {
                 dispatch: 0,
                 disclaimer: 0,
                 internationalNote: 0,
+                mainImageInfo: 0,
+                "galleryImages.title": 0,
+                "galleryImages.description": 0,
+                "galleryImages.caption": 0,
+                "galleryImages.tags": 0,
             });
         }
 
@@ -1193,8 +1200,8 @@ const getRecommendations = async (req, res) => {
             priceQ,
             { isNewArrival: true },
             { isOnSale: true },
-            { _id: { $nin: [...seen] } }, // broad fallback (explicit object, survives filter)
-        ];
+            {},
+        ].filter(Boolean);
         // Interleave staged candidates with variety (70% stage, 30% newest)
         // using a single pass of bounded indexed queries. Each query uses
         // compound indexes (category/material/collection + createdAt).
