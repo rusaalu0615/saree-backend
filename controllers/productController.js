@@ -151,10 +151,8 @@ const getAllProducts = async (req, res) => {
         const andConditions = [];
         let isTextSearch = false;
         
-        // 1. Text Search
         // 1. Text Search (Exact SKU Match Priority)
         if (searchQuery) {
-            andConditions.push({ $text: { $search: searchQuery } });
             const trimmedQuery = searchQuery.trim();
             const skuExists = await productModal.exists({ sku: new RegExp(`^${escapeRegex(trimmedQuery)}$`, "i") });
             if (skuExists) {
@@ -194,6 +192,8 @@ const getAllProducts = async (req, res) => {
                 andConditions.push({ $or: [{ isFestive: true }, { productCollection: "festive" }] });
             } else if (targetCollection === "big-sale" || targetCollection === "sale") {
                 andConditions.push({ $or: [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }] });
+            } else if (targetCollection === "new-arrivals") {
+                andConditions.push({ $or: [{ isNewArrival: true }, { productCollection: "new-arrivals" }] });
             } else {
                 andConditions.push({ productCollection: targetCollection });
             }
@@ -996,6 +996,8 @@ const getFilters = async (req, res) => {
                 andConditions.push({ $or: [{ isFestive: true }, { productCollection: "festive" }] });
             } else if (targetCollection === "big-sale" || targetCollection === "sale") {
                 andConditions.push({ $or: [{ isOnSale: true }, { productCollection: "big-sale" }, { productCollection: "sale" }] });
+            } else if (targetCollection === "new-arrivals") {
+                andConditions.push({ $or: [{ isNewArrival: true }, { productCollection: "new-arrivals" }] });
             } else {
                 andConditions.push({ productCollection: targetCollection });
             }

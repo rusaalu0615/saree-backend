@@ -6,7 +6,6 @@ import { adminProtect } from "../middlewares/adminMiddleware.js";
 import validate from "../middlewares/validate.js";
 import { addProductSchema } from "../validations/schemas.js";
 
-const { addProduct, getAllProducts, getProductById, getProductBySku, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations, getProductCardsByIds } = productController;
 const { addProduct, getAllProducts, getProductById, getProductBySku, getProductBySlug, getAdminMediaLibrary, deleteProduct, deleteMultipleProducts, updateProduct, updateGalleryImageInfo, uploadProductVideo, quickUpdateProduct, getFilters, getRecommendations, getProductCardsByIds } = productController;
 
 const router = express.Router();
@@ -23,7 +22,6 @@ router.get("/:id", getProductById);
 // Protected Admin routes (require whitelisted Admin token)
 router.get("/admin/media-library", adminProtect, getAdminMediaLibrary);
 
-router.get("/:id", getProductById);
 router.post("/add-product", adminProtect, upLoadImage.fields([
     { name: "mainImage", maxCount: 1 },
     { name: "galleryImages", maxCount: 10 },
