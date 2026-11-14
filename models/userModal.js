@@ -1,6 +1,5 @@
 import mongoose from "mongoose";
 
-
 const addressSchema = new mongoose.Schema({
     fullName: String,
     mobile: String,
@@ -9,8 +8,7 @@ const addressSchema = new mongoose.Schema({
     city: String,
     address: String,
     landmark: String,
-
-})
+});
 
 const cartSchema = new mongoose.Schema({
     productId: {
@@ -22,7 +20,7 @@ const cartSchema = new mongoose.Schema({
         type: Number,
         required: true,
     },
-})
+});
 
 const wishListSchema = new mongoose.Schema({
     productId: {
@@ -34,11 +32,16 @@ const wishListSchema = new mongoose.Schema({
         type: Number,
         required: true,
     },
-
-})
-
+});
 
 const userSchema = new mongoose.Schema({
+    storeId: {
+        type: String,
+        required: true,
+        enum: ["handloomer", "linen"],
+        default: "handloomer",
+        index: true,
+    },
     name: {
         type: String,
         required: true,
@@ -46,7 +49,6 @@ const userSchema = new mongoose.Schema({
     email: {
         type: String,
         required: true,
-        unique: true,
         lowercase: true,
         trim: true,
     },
@@ -56,16 +58,9 @@ const userSchema = new mongoose.Schema({
     },
     password: {
         type: String,
-        // Never returned by default — controllers that need to compare hashes
-        // must opt in with .select("+password"). Prevents accidental hash leaks.
         select: false,
     },
-    // Set whenever the password changes (reset). JWTs issued before this
-    // timestamp are rejected, so a reset signs out all other devices/sessions.
     passwordChangedAt: { type: Date },
-    // Sessions explicitly killed before their natural expiry (logout). Each
-    // entry is the jti of a revoked token + when it would have expired, so the
-    // list self-prunes. select:false keeps it out of every API response.
     revokedTokens: {
         type: [{ jti: String, expiresAt: Date }],
         default: [],
@@ -80,5 +75,11 @@ const userSchema = new mongoose.Schema({
     cart: [cartSchema],
     wishList: [wishListSchema],
 }, { timestamps: true });
+
+// Multi-Store Isolation:
+// - Email is unique per store: allows identical email across stores, but unique within each store.
+// - Phone is indexed per store for fast lookups, but non-unique (allows family members / guest checkouts to share a phone).
+userSchema.index({ email: 1, storeId: 1 }, { unique: true });
+userSchema.index({ phone: 1, storeId: 1 });
 
 export default mongoose.model("User", userSchema);

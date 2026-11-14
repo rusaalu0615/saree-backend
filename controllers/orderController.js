@@ -18,6 +18,7 @@ import { ensureGatewayOrder } from "../services/gatewayOrder.js";
 import { settleCartAfterPayment, applyCodCartAndAddress } from "../services/cartSettlement.js";
 import { executeOrderTransition } from "../services/orderTransitions.js";
 import { ensureDatabaseReady } from "../config/indexReadiness.js";
+import { toCanonicalStoreId } from "../config/stores.js";
 import {
     reconcileOrderPayments,
     findPaymentRefunds,
@@ -172,6 +173,12 @@ const checkoutPayloadHash = (normalized) =>
     crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 
 const createOrder = asyncHandler(async (req, res) => {
+    // Resolve verified store context: customer token store binds strictly; guest uses request store
+    const rawStoreId = (req.user && req.user.role !== "admin")
+        ? (req.user.storeId || req.store?.id || "handloomer")
+        : (req.store?.id || "handloomer");
+    const verifiedStoreId = toCanonicalStoreId(rawStoreId, "handloomer");
+
     // Validate the entire payload with Zod FIRST — object shape, required
     // contact/address fields, formats and quantity bounds.
     const parsed = createOrderSchema.safeParse(req.body);
@@ -217,7 +224,7 @@ const createOrder = asyncHandler(async (req, res) => {
 
     // ---- Retry idempotency: same checkoutKey = same attempt --------------
     if (checkoutKey) {
-        const existing = await Order.findOne({ checkoutKey });
+        const existing = await Order.findOne({ checkoutKey, storeId: verifiedStoreId });
         if (existing) {
             if (existing.checkoutPayloadHash !== payloadHash) {
                 // A genuine conflicting reuse of the key — the client must start a
@@ -336,53 +343,11 @@ const createOrder = asyncHandler(async (req, res) => {
         // Temporarily 0 for all orders (Free Shipping) — to restore: subtotalPaise >= toPaise(999) ? 0 : toPaise(199);
         const shippingPaise = 0;
 
-        // Determine User ID — Link to existing account or silently auto-create for guest
+        // Determine User ID:
+        // Authenticated checkout: explicitly use verified req.user._id
+        // Guest checkout: keep order.user null and isGuest true (no email lookup, no silent account creation)
         const isGuest = !req.user;
-        const shippingEmail = shippingAddress.email ? String(shippingAddress.email).trim().toLowerCase() : "";
-        if (!isGuest) {
-            orderUserId = req.user._id;
-        } else if (shippingEmail) {
-            let existingUser = await User.findOne({
-                email: { $regex: new RegExp(`^${shippingEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
-            }).session(session);
-
-            if (existingUser) {
-                orderUserId = existingUser._id;
-            } else {
-                try {
-                    const customerName = `${shippingAddress.firstName || ""} ${shippingAddress.lastName || ""}`.trim() || "Customer";
-                    const randomPassword = crypto.randomBytes(16).toString("hex");
-                    const hashedPassword = await bcrypt.hash(randomPassword, 10);
-                    const [newUser] = await User.create(
-                        [
-                            {
-                                name: customerName,
-                                email: shippingEmail,
-                                phone: shippingAddress.phone || "N/A",
-                                password: hashedPassword,
-                                role: "user",
-                            },
-                        ],
-                        { session }
-                    );
-                    if (newUser) {
-                        orderUserId = newUser._id;
-                        console.log(`[createOrder] Silently auto-created customer account for ${shippingEmail}: ${newUser._id}`);
-                    }
-                } catch (userCreateErr) {
-                    const fallbackUser = await User.findOne({
-                        email: { $regex: new RegExp(`^${shippingEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
-                    }).session(session);
-                    if (fallbackUser) {
-                        orderUserId = fallbackUser._id;
-                    } else {
-                        console.warn("[createOrder] User auto-creation notice:", userCreateErr.message);
-                    }
-                }
-            }
-        } else {
-            orderUserId = undefined;
-        }
+        const orderUserId = isGuest ? null : req.user._id;
 
         // ---- Claim the coupon ATOMICALLY inside this transaction ----
         let discountPaise = 0;
@@ -394,7 +359,7 @@ const createOrder = asyncHandler(async (req, res) => {
             const cleanCode = couponCode.trim().toUpperCase();
 
             const coupon = await Coupon.findOne({ code: cleanCode }).session(session);
-            if (!coupon || !coupon.isValid()) {
+            if (!coupon || !coupon.isValid(verifiedStoreId)) {
                 throw new AppError("Coupon is invalid or has expired.", 400);
             }
             const minPurchasePaise = toPaise(coupon.minPurchase);
@@ -453,7 +418,8 @@ const createOrder = asyncHandler(async (req, res) => {
 
         const cod = paymentMethod === "cod";
         order = new Order({
-            user: isGuest ? undefined : orderUserId,
+            storeId: verifiedStoreId,
+            user: isGuest ? null : orderUserId,
             isGuest: isGuest,
             checkoutKey: checkoutKey || undefined,
             checkoutPayloadHash: payloadHash,
@@ -703,7 +669,18 @@ async function resolveOwnedOrder(orderIdRaw, req, order = null) {
     const found = order || (await Order.findOne({ orderId: String(orderIdRaw).trim().toUpperCase() }));
     if (!found) throw new AppError("Order not found", 404);
 
-    if (req.user && String(req.user._id) === String(found.user)) return found;
+    // Cross-store isolation: non-admins cannot act on orders from another store
+    const requestStoreId = req.store?.id;
+    if (requestStoreId && req.user?.role !== "admin" && found.storeId && found.storeId !== requestStoreId) {
+        throw new AppError("Forbidden: this order belongs to another store.", 403);
+    }
+
+    if (req.user) {
+        if (req.user.role !== "admin" && found.storeId && req.user.storeId && found.storeId !== req.user.storeId) {
+            throw new AppError("Forbidden: cross-store order access denied.", 403);
+        }
+        if (String(req.user._id) === String(found.user)) return found;
+    }
 
     const token = req.body && req.body.checkoutToken;
     if (
@@ -1763,12 +1740,15 @@ const getUserOrders = asyncHandler(async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 50);
     const skip = (page - 1) * limit;
 
-    const userEmail = (req.user.email || "").trim().toLowerCase();
+    const rawStoreId = (req.user && req.user.role !== "admin")
+        ? (req.user.storeId || req.store?.id || "handloomer")
+        : (req.store?.id || req.user?.storeId || "handloomer");
+    const verifiedStoreId = toCanonicalStoreId(rawStoreId, "handloomer");
+
+    // Strict customer order ownership: authenticated customer can only view orders owned by their user ID
     const orderFilter = {
-        $or: [
-            { user: req.user._id },
-            ...(userEmail ? [{ "shippingAddress.email": { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } }] : []),
-        ],
+        storeId: verifiedStoreId,
+        user: req.user._id,
     };
 
     const [orders, total] = await Promise.all([
@@ -1800,16 +1780,19 @@ const getUserOrders = asyncHandler(async (req, res) => {
     });
 });
 
-/** GET /api/order/:id — single order details (own order only) */
+/** GET /api/order/:id — single order details (own order only, or admin) */
 const getOrderById = asyncHandler(async (req, res) => {
-    const userEmail = (req.user.email || "").trim().toLowerCase();
-    const order = await Order.findOne({
+    const rawStoreId = (req.user && req.user.role !== "admin")
+        ? (req.user.storeId || req.store?.id || "handloomer")
+        : (req.store?.id || req.user?.storeId || "handloomer");
+    const verifiedStoreId = toCanonicalStoreId(rawStoreId, "handloomer");
+
+    const query = {
         _id: req.params.id,
-        $or: [
-            { user: req.user._id },
-            ...(userEmail ? [{ "shippingAddress.email": { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } }] : []),
-        ],
-    })
+        ...(req.user.role === "admin" ? {} : { user: req.user._id, storeId: verifiedStoreId }),
+    };
+
+    const order = await Order.findOne(query)
         .populate("items.productId", "name mainImage")
         .select("-payment.checkoutTokenHash -payment.razorpaySignature");
 
@@ -1843,15 +1826,17 @@ const cancelUserOrder = asyncHandler(async (req, res) => {
         throw new AppError("Order not found", 404);
     }
 
-    // Resolve order with BOTH order ID AND authenticated owner ID or email
-    const userEmail = (req.user.email || "").trim().toLowerCase();
-    const order = await Order.findOne({
+    const rawStoreId = (req.user && req.user.role !== "admin")
+        ? (req.user.storeId || req.store?.id || "handloomer")
+        : (req.store?.id || req.user?.storeId || "handloomer");
+    const verifiedStoreId = toCanonicalStoreId(rawStoreId, "handloomer");
+
+    // Resolve order with strict user ownership and store isolation
+    const query = {
         _id: req.params.id,
-        $or: [
-            { user: req.user._id },
-            ...(userEmail ? [{ "shippingAddress.email": { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } }] : []),
-        ],
-    });
+        ...(req.user.role === "admin" ? {} : { user: req.user._id, storeId: verifiedStoreId }),
+    };
+    const order = await Order.findOne(query);
     if (!order) {
         throw new AppError("Order not found", 404);
     }
@@ -1881,9 +1866,18 @@ const cancelUserOrder = asyncHandler(async (req, res) => {
     });
 });
 
-/** GET /api/order/:id/track — live tracking (owner) */
+/** GET /api/order/:id/track — live tracking (owner or admin) */
 const trackOrder = asyncHandler(async (req, res) => {
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id, isGuest: { $ne: true } });
+    const rawStoreId = (req.user && req.user.role !== "admin")
+        ? (req.user.storeId || req.store?.id || "handloomer")
+        : (req.store?.id || req.user?.storeId || "handloomer");
+    const verifiedStoreId = toCanonicalStoreId(rawStoreId, "handloomer");
+
+    const query = {
+        _id: req.params.id,
+        ...(req.user.role === "admin" ? {} : { user: req.user._id, storeId: verifiedStoreId }),
+    };
+    const order = await Order.findOne(query);
     if (!order) throw new AppError("Order not found", 404);
 
     // Single normalization layer with short cache + stored-status fallback, so a
@@ -1975,7 +1969,9 @@ const trackOrderPublic = asyncHandler(async (req, res) => {
     const cleanOrderId = orderId.trim().toUpperCase().slice(0, 40);
     const cleanEmail = email.trim().toLowerCase().slice(0, 200);
 
+    const storeQuery = req.store?.id ? { storeId: req.store.id } : {};
     const order = await Order.findOne({
+        ...storeQuery,
         $or: [{ orderId: cleanOrderId }, { "shiprocket.awbCode": cleanOrderId }],
         "shippingAddress.email": cleanEmail,
     }).lean();
@@ -2044,11 +2040,17 @@ const getAllOrders = asyncHandler(async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
     const skip = (page - 1) * limit;
     const status = req.query.status;
+    const storeId = req.query.storeId;
 
     const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim() : (typeof req.query.q === 'string' ? req.query.q.trim() : '');
     const search = escapeRegex(rawSearch);
 
     const andClauses = [];
+
+    // Store filter for centralized admin dashboard
+    if (storeId && storeId !== 'all') {
+        andClauses.push({ storeId: storeId.trim().toLowerCase() });
+    }
 
     // Status filter
     if (status && status !== 'all') {
@@ -2464,10 +2466,18 @@ const abandonCheckout = asyncHandler(async (req, res) => {
         throw new AppError("Cannot abandon a paid or Cash-on-Delivery order. Please use standard order cancellation.", 400);
     }
 
-    // Safety gateway check: if gateway has captured payment, refuse cancellation
-    if (razorpayInstance && order.payment?.razorpayOrderId) {
+    // Safety gateway check: if a gateway order exists, authoritatively verify before cancelling
+    if (order.payment?.razorpayOrderId) {
+        if (!razorpayInstance) {
+            return res.status(503).json({
+                success: false,
+                code: "GATEWAY_UNAVAILABLE",
+                message: "Payment gateway is unavailable to verify payment status. Order cancellation paused to protect inventory.",
+                orderId: order.orderId,
+            });
+        }
         try {
-            const rec = await reconcileGatewayPayment(razorpayInstance, order.payment.razorpayOrderId, {
+            const rec = await reconcileOrderPayments(razorpayInstance, order.payment.razorpayOrderId, {
                 expectedAmountPaise: toPaise(order.pricing.total),
             });
             if (rec.outcome === RZP_OUTCOME.CAPTURED_VALID || rec.outcome === RZP_OUTCOME.IN_PROGRESS) {
@@ -2478,8 +2488,31 @@ const abandonCheckout = asyncHandler(async (req, res) => {
                     orderId: order.orderId,
                 });
             }
+            if (rec.outcome === RZP_OUTCOME.MISMATCH) {
+                return res.status(409).json({
+                    success: false,
+                    code: "PAYMENT_HELD",
+                    message: "A payment with amount discrepancy was detected on the gateway. Order cancellation is paused for review.",
+                    orderId: order.orderId,
+                });
+            }
+            if (rec.outcome === RZP_OUTCOME.UNKNOWN) {
+                return res.status(503).json({
+                    success: false,
+                    code: "GATEWAY_UNCERTAIN",
+                    message: `Unable to verify gateway payment status (${rec.reason || "unknown"}). Order cancellation is paused to protect against duplicate charges or inventory errors.`,
+                    orderId: order.orderId,
+                });
+            }
+            // Only RZP_OUTCOME.NO_CAPTURED proceeds to cancellation
         } catch (gwErr) {
-            console.warn(`[Abandon] Gateway check failed for ${order.orderId}:`, gwErr.message);
+            console.error(`[Abandon] Gateway check failed for ${order.orderId}:`, gwErr.message);
+            return res.status(503).json({
+                success: false,
+                code: "GATEWAY_ERROR",
+                message: "Unable to connect to payment gateway to verify status. Order cancellation paused to protect inventory.",
+                orderId: order.orderId,
+            });
         }
     }
 
@@ -2498,12 +2531,89 @@ const abandonCheckout = asyncHandler(async (req, res) => {
     });
 });
 
+/**
+ * POST /api/order/claim — Authenticated customer claims an unowned guest order.
+ * Allows an authenticated customer to explicitly link an unowned guest order to their account.
+ * Security requirements:
+ *   - Must be authenticated (enforced by `protect` middleware).
+ *   - Store isolation: The order must belong to the authenticated user's store context.
+ *   - Ownership proof: A valid checkout capability token is strictly required. Matching email alone is NEVER authorized.
+ *   - Concurrency safety: Uses an atomic conditional update so concurrent requests cannot double-claim.
+ */
+const claimGuestOrder = asyncHandler(async (req, res) => {
+    const { orderId, checkoutToken } = req.body || {};
+    if (!orderId || typeof orderId !== "string" || !orderId.trim()) {
+        throw new AppError("Order ID is required to claim an order.", 400);
+    }
+    if (!checkoutToken || !isPlainString(checkoutToken)) {
+        throw new AppError("A valid checkout token is required to claim this order.", 400);
+    }
+
+    const verifiedStoreId = toCanonicalStoreId(req.user.storeId || req.store?.id || "handloomer", "handloomer");
+    const cleanOrderId = orderId.trim().toUpperCase();
+    const cleanToken = checkoutToken.trim();
+
+    // 1. Find the order in the current verified store context
+    const order = await Order.findOne({ orderId: cleanOrderId, storeId: verifiedStoreId });
+    if (!order) {
+        throw new AppError("Order not found.", 404);
+    }
+
+    // 2. If already owned by this exact user, return success idempotently
+    if (order.user && String(order.user) === String(req.user._id)) {
+        return res.status(200).json({
+            success: true,
+            message: "Order is already linked to your account.",
+            orderId: order.orderId,
+        });
+    }
+
+    // 3. If already owned by another user, reject
+    if (order.user && String(order.user) !== String(req.user._id)) {
+        throw new AppError("This order is already claimed by another account.", 403);
+    }
+
+    // 4. Verify checkout capability token (cryptographic hash comparison)
+    const tokenHash = hashToken(cleanToken);
+    if (!order.payment?.checkoutTokenHash || !safeCompare(tokenHash, order.payment.checkoutTokenHash)) {
+        throw new AppError("Invalid checkout capability token.", 403);
+    }
+
+    // 5. Atomic conditional update: atomically ensure user is still unclaimed (null/undefined)
+    // and transfer ownership to req.user._id
+    const claimedOrder = await Order.findOneAndUpdate(
+        {
+            _id: order._id,
+            storeId: verifiedStoreId,
+            user: null,
+        },
+        {
+            $set: {
+                user: req.user._id,
+                isGuest: false,
+            },
+        },
+        { new: true }
+    );
+
+    if (!claimedOrder) {
+        throw new AppError("Order claim failed: this order has already been claimed by another account.", 409);
+    }
+
+    res.status(200).json({
+        success: true,
+        message: "Order successfully claimed and linked to your account.",
+        orderId: claimedOrder.orderId,
+    });
+});
+
 export default {
     createOrder,
     getUserOrders,
     getOrderById,
     trackOrder,
     trackOrderPublic,
+    claimGuestOrder,
     getAllOrders,
     updateOrderStatus,
     cancelOrder,

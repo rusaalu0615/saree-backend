@@ -67,9 +67,9 @@ export const CRITICAL_UNIQUE_INDEXES = [
     {
         model: User,
         modelName: "User",
-        key: { email: 1 },
+        key: { email: 1, storeId: 1 },
         options: { unique: true },
-        description: "Customer account uniqueness",
+        description: "Customer account store-isolated uniqueness",
     },
     {
         model: Coupon,

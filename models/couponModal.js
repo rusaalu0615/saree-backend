@@ -31,6 +31,11 @@ const couponSchema = new mongoose.Schema({
         type: Boolean,
         default: true,
     },
+    storeId: {
+        type: String,
+        default: null, // null = applies to all stores; "handloomer" or "linen" = restricted
+        index: true,
+    },
     usageLimit: {
         type: Number,
         default: 100, // how many times this coupon can be used overall
@@ -51,10 +56,12 @@ const couponSchema = new mongoose.Schema({
     ],
 }, { timestamps: true });
 
-// Check if coupon is valid (not expired, active, and within limit)
-couponSchema.methods.isValid = function () {
+// Check if coupon is valid (not expired, active, within limit, and matching store if restricted)
+couponSchema.methods.isValid = function (currentStoreId = null) {
+    const storeMatches = !this.storeId || !currentStoreId || this.storeId === currentStoreId;
     return (
         this.isActive &&
+        storeMatches &&
         this.usedCount < this.usageLimit &&
         new Date() <= new Date(this.expiryDate)
     );

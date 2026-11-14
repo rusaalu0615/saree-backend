@@ -19,6 +19,8 @@ import AppError from "./utils/AppError.js";
 import { verifyDatabaseReadiness, getReadinessStatus } from "./config/indexReadiness.js";
 import { verifyEmailConfig } from "./services/emailService.js";
 import { csrfGuard } from "./middlewares/csrfGuard.js";
+import { storeMiddleware } from "./middlewares/storeMiddleware.js";
+import { getAllAllowedOrigins } from "./config/stores.js";
 
 
 const app = express();
@@ -35,17 +37,15 @@ app.use(compression());
 
 const allowedOrigins = [
     "http://localhost:3000",
-
+    "http://localhost:3001",
     "https://linen-saree.vercel.app",
-
     "https://handloomer.com",
     "https://www.handloomer.com",
-
     "https://linensaree.in",
     "https://www.linensaree.in",
-
     "https://sareeghar.com",
     "https://www.sareeghar.com",
+    ...getAllAllowedOrigins(),
 ];
 
 // CORS Configuration
@@ -106,6 +106,7 @@ app.use(
             "Content-Type",
             "Authorization",
             "X-Requested-With",
+            "X-Store-Id",
         ],
     })
 );
@@ -179,6 +180,10 @@ app.use("/api", (req, res, next) => {
     }
     next();
 });
+
+// Store resolution middleware: resolves store context via X-Store-Id or Host/Origin
+// Defaults to 'handloomer' for backwards compatibility
+app.use("/api", storeMiddleware);
 
 // Routes
 app.use("/api", indexRoutes);

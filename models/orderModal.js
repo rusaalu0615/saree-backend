@@ -34,6 +34,13 @@ const timelineEntrySchema = new mongoose.Schema({
 });
 
 const orderSchema = new mongoose.Schema({
+    storeId: {
+        type: String,
+        required: true,
+        enum: ["handloomer", "linen"],
+        default: "handloomer",
+        index: true,
+    },
     orderId: {
         type: String,
         unique: true,
@@ -273,6 +280,9 @@ orderSchema.pre("validate", async function () {
 });
 
 // Indexes for fast lookups
+orderSchema.index({ storeId: 1, user: 1, createdAt: -1 });
+orderSchema.index({ storeId: 1, status: 1 });
+orderSchema.index({ storeId: 1, "shippingAddress.email": 1 });
 orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ status: 1 });
 orderSchema.index({ "shiprocket.awbCode": 1 });

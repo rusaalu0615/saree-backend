@@ -12,6 +12,7 @@ const {
     getOrderById,
     trackOrder,
     trackOrderPublic,
+    claimGuestOrder,
     getAllOrders,
     updateOrderStatus,
     cancelOrder,
@@ -46,6 +47,7 @@ router.post("/", optionalProtect, createOrder);
 router.post("/verify-payment", optionalProtect, verifyPayment);
 router.post("/abandon-checkout", optionalProtect, abandonCheckout);
 router.get("/my-orders", protect, getUserOrders);
+router.post("/claim", protect, claimGuestOrder);
 router.get("/:id", protect, getOrderById);
 router.post("/:id/cancel", protect, cancelUserOrder);
 router.get("/:id/track", protect, trackOrder);

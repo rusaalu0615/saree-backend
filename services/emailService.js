@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import dns from "dns";
 import { formatPaiseAsINR, toPaise } from "../utils/security.js";
+import { getStoreConfig } from "../config/stores.js";
 
 // Force Node.js to prefer IPv4 DNS resolution globally. This completely eliminates ENETUNREACH 
 // errors when attempting to connect to Google SMTP servers in IPv6-unsupported container networks (like Render).
@@ -78,7 +79,10 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
         const transporter = getTransporter();
 
         const hasValidPdf = pdfBuffer && Buffer.isBuffer(pdfBuffer) && pdfBuffer.length > 0;
-        const storeUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://handloomer.com";
+        const store = getStoreConfig(order?.storeId);
+        const storeUrl = store.frontendUrl;
+        const storeName = store.name;
+        const brandTitle = store.invoiceHeader || store.name;
 
         const safeFirstName = escapeHtml(order.shippingAddress?.firstName || "Customer");
         const safeLastName = escapeHtml(order.shippingAddress?.lastName || "");
@@ -120,13 +124,13 @@ export const sendOrderConfirmationEmail = async (order, pdfBuffer) => {
             : `<p style="margin-top: 30px; font-size: 14px; color: #666;">Your invoice will be included with your shipment and is available in your order tracking dashboard.</p>`;
 
         const mailOptions = {
-            from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
+            from: `"${storeName}" <${process.env.EMAIL_USER}>`,
             to: safeEmail,
-            subject: `Order Confirmation - ${safeOrderId}`,
+            subject: `Order Confirmation - ${safeOrderId} — ${storeName}`,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                     <div style="text-align: center; padding: 20px 0;">
-                        <h1 style="color: #8B7355; margin: 0;">MS HANDLOOM</h1>
+                        <h1 style="color: #8B7355; margin: 0;">${escapeHtml(brandTitle)}</h1>
                     </div>
                     
                     <div style="padding: 20px; background-color: #f9f9f9; border-radius: 5px;">
@@ -253,29 +257,33 @@ export const sendShippingUpdateEmail = async (order, status) => {
     const safeFirstName = escapeHtml(order.shippingAddress?.firstName || "Customer");
     const safeAwb = escapeHtml(order.shiprocket?.awbCode || "");
     const safeCourier = escapeHtml(order.shiprocket?.courierName || "Assigned Courier");
-    const storeUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://handloomer.com";
+
+    const store = getStoreConfig(order?.storeId);
+    const storeUrl = store.frontendUrl;
+    const storeName = store.name;
+    const brandTitle = store.invoiceHeader || store.name;
 
     if (status === "shipped") {
-        subject = `Your Order ${order.orderId} has Shipped!`;
+        subject = `Your Order ${order.orderId} has Shipped! — ${storeName}`;
         statusMessage = "Good news! Your order has been packed and handed over to our delivery partner.";
     } else if (status === "out_for_delivery") {
-        subject = `Your Order ${order.orderId} is Out for Delivery!`;
+        subject = `Your Order ${order.orderId} is Out for Delivery! — ${storeName}`;
         statusMessage = "Your order is out for delivery and should arrive today.";
     } else {
-        subject = `Your Order ${order.orderId} has been Delivered`;
+        subject = `Your Order ${order.orderId} has been Delivered — ${storeName}`;
         statusMessage = "Your order has been successfully delivered. We hope you love your purchase!";
     }
 
     const transporter = getTransporter();
 
     const mailOptions = {
-        from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
+        from: `"${storeName}" <${process.env.EMAIL_USER}>`,
         to: order.shippingAddress?.email,
         subject: subject,
         html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                 <div style="text-align: center; padding: 20px 0;">
-                    <h1 style="color: #8B7355; margin: 0;">MS HANDLOOM</h1>
+                    <h1 style="color: #8B7355; margin: 0;">${escapeHtml(brandTitle)}</h1>
                 </div>
                 
                 <div style="padding: 20px; background-color: #f9f9f9; border-radius: 5px;">
@@ -336,7 +344,12 @@ export const sendOrderCancelledEmail = async (order) => {
     const safeOrderId = escapeHtml(order.orderId || "");
     const safeFirstName = escapeHtml(order.shippingAddress?.firstName || "Customer");
     const safeReason = escapeHtml(order.cancellation?.reason || "Cancelled as requested");
-    const storeUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://handloomer.com";
+
+    const store = getStoreConfig(order?.storeId);
+    const storeUrl = store.frontendUrl;
+    const storeName = store.name;
+    const brandTitle = store.invoiceHeader || store.name;
+
     const isPaid = (order.payment?.method !== "cod") && (order.payment?.status === "paid" || order.payment?.status === "refunded" || (order.payment?.amountPaid > 0));
     
     // Strict money conversion with lifecycle semantics — NO heuristics:
@@ -356,13 +369,13 @@ export const sendOrderCancelledEmail = async (order) => {
     const transporter = getTransporter();
 
     const mailOptions = {
-        from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
+        from: `"${storeName}" <${process.env.EMAIL_USER}>`,
         to: recipientEmail,
-        subject: `Your Order ${safeOrderId} has been Cancelled`,
+        subject: `Your Order ${safeOrderId} has been Cancelled — ${storeName}`,
         html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
                 <div style="text-align: center; padding: 24px 0 16px;">
-                    <h1 style="color: #8B7355; margin: 0; font-size: 26px; letter-spacing: 1px;">MS HANDLOOM</h1>
+                    <h1 style="color: #8B7355; margin: 0; font-size: 26px; letter-spacing: 1px;">${escapeHtml(brandTitle)}</h1>
                 </div>
                 
                 <div style="padding: 24px; background-color: #fdfaf6; border-radius: 8px; border: 1px solid #e8dfd5;">
@@ -482,8 +495,9 @@ export const sendAdminOTPEmail = async (email, otp) => {
  * Send Password Reset OTP Email
  * @param {String} email - User's email address
  * @param {String} otp - 6-digit OTP code
+ * @param {String} storeId - Target store ID
  */
-export const sendPasswordResetOTPEmail = async (email, otp) => {
+export const sendPasswordResetOTPEmail = async (email, otp, storeId = "handloomer") => {
     try {
         if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
             const msg = "[Email] Critical configuration error: EMAIL_USER or EMAIL_PASS not set";
@@ -491,16 +505,20 @@ export const sendPasswordResetOTPEmail = async (email, otp) => {
             throw new Error(msg);
         }
 
+        const store = getStoreConfig(storeId);
+        const storeName = store.name;
+        const brandTitle = store.invoiceHeader || store.name;
+
         const transporter = getTransporter();
         const safeOtp = escapeHtml(otp);
         const mailOptions = {
-            from: `"Ms Handloom" <${process.env.EMAIL_USER}>`,
+            from: `"${storeName}" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: `Password Reset Verification Code — Ms Handloom`,
+            subject: `Password Reset Verification Code — ${storeName}`,
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e5ded6; border-radius: 8px; color: #333;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
-                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">MS HANDLOOM</h1>
+                        <h1 style="color: #8B7355; margin: 0; font-family: 'Playfair Display', serif; letter-spacing: 2px;">${escapeHtml(brandTitle)}</h1>
                     </div>
                     
                     <div style="padding: 10px 0;">
@@ -555,10 +573,13 @@ export const sendAdminOrderNotificationEmail = async (order) => {
             .map((i) => `<li>${Number(i.quantity) || 1}x ${escapeHtml(i.name)} (SKU: ${escapeHtml(i.sku || "N/A")}) - ${formatCurrency((i.price || 0) * (i.quantity || 1))}</li>`)
             .join("");
 
+        const store = getStoreConfig(order?.storeId);
+        const storeName = store.name;
+
         const mailOptions = {
-            from: `"Ms Handloom System" <${process.env.EMAIL_USER}>`,
+            from: `"${storeName} System" <${process.env.EMAIL_USER}>`,
             to: adminEmails,
-            subject: `🎉 NEW ORDER: ${safeOrderId} - ${formatCurrency(order.pricing?.total || 0)}`,
+            subject: `🎉 [${storeName}] NEW ORDER: ${safeOrderId} - ${formatCurrency(order.pricing?.total || 0)}`,
             html: `
                 <div style="font-family: Arial, sans-serif; padding: 20px; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px;">
                     <div style="text-align: center; border-bottom: 2px solid #8B7355; padding-bottom: 15px; margin-bottom: 20px;">
@@ -566,6 +587,7 @@ export const sendAdminOrderNotificationEmail = async (order) => {
                     </div>
                     
                     <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+                        <tr><td style="padding: 5px 0;"><strong>Store:</strong></td><td><strong style="color: #8B7355;">${escapeHtml(storeName)}</strong> (${escapeHtml(store.id)})</td></tr>
                         <tr><td style="padding: 5px 0;"><strong>Order ID:</strong></td><td>${safeOrderId}</td></tr>
                         <tr><td style="padding: 5px 0;"><strong>Customer:</strong></td><td>${safeCustName}</td></tr>
                         <tr><td style="padding: 5px 0;"><strong>Email:</strong></td><td>${safeEmail}</td></tr>

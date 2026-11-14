@@ -28,11 +28,12 @@ const hashOtp = (otp) => crypto.createHash("sha256").update(otp).digest("hex");
 // ~15 guesses) and against plaintext OTP leaking on a DB read breach.
 const OTP_RESET_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 
-const checkResetOtp = async (sanitizedEmail, otp) => {
+const checkResetOtp = async (sanitizedEmail, otp, storeId = "handloomer") => {
     const now = new Date();
-    // Atomically increment attempts on an unexpired, purpose-bound record
+    // Atomically increment attempts on an unexpired, purpose-bound record for this store
     const record = await OTP.findOneAndUpdate(
         {
+            storeId,
             email: sanitizedEmail,
             purpose: "password_reset",
             expiresAt: { $gt: now },
@@ -44,13 +45,13 @@ const checkResetOtp = async (sanitizedEmail, otp) => {
 
     if (!record) {
         // Record missing, expired, or attempts exceeded
-        await OTP.deleteMany({ email: sanitizedEmail, purpose: "password_reset" });
+        await OTP.deleteMany({ storeId, email: sanitizedEmail, purpose: "password_reset" });
         return { ok: false, reason: "expired_or_locked" };
     }
 
     if (!safeHexCompare(record.otp, hashOtp(otp))) {
         if (record.attempts >= MAX_OTP_ATTEMPTS) {
-            await OTP.deleteMany({ email: sanitizedEmail, purpose: "password_reset" });
+            await OTP.deleteMany({ storeId, email: sanitizedEmail, purpose: "password_reset" });
             return { ok: false, reason: "locked" };
         }
         return { ok: false, reason: "invalid", remaining: MAX_OTP_ATTEMPTS - record.attempts };
@@ -81,6 +82,7 @@ const readToken = (req) => {
 
 const registerUser = asyncHandler(async (req, res) => {
     const { name, email, phone, password } = req.body;
+    const storeId = req.store?.id || "handloomer";
 
     if (!email) {
         return res.status(400).json({ message: "Email is required" });
@@ -88,7 +90,8 @@ const registerUser = asyncHandler(async (req, res) => {
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    const userExists = await User.findOne({ email: sanitizedEmail });
+    // Check if user already exists within THIS store
+    const userExists = await User.findOne({ storeId, email: sanitizedEmail });
     if (userExists) {
         return res.status(400).json({ message: "User already exists" });
     }
@@ -108,9 +111,10 @@ const registerUser = asyncHandler(async (req, res) => {
         email: sanitizedEmail,
         phone,
         password: hashedPassword,
+        storeId,
     });
 
-    const token = generateToken(user._id);
+    const token = generateToken(user._id, storeId);
 
     // Set secure, HttpOnly cookie for XSS protection
     const secure = isRequestSecure(req);
@@ -126,12 +130,14 @@ const registerUser = asyncHandler(async (req, res) => {
         name: user.name,
         email: user.email,
         phone: user.phone,
+        storeId: user.storeId,
         token,
-    })
+    });
 });
 
 const loginUser = asyncHandler(async (req, res) => {
     const { email, password } = req.body;
+    const storeId = req.store?.id || "handloomer";
 
     // Type guards: also blocks NoSQL-operator payloads ({"$ne": ...} has no .trim)
     if (!email || typeof email !== "string") {
@@ -140,24 +146,33 @@ const loginUser = asyncHandler(async (req, res) => {
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    // Find the user WITHOUT projecting the password hash out of the response path
-    const user = await User.findOne({ email: sanitizedEmail }).select("+password -__v");
+    // Find the user within the active store context.
+    // If not found in this store, allow centralized admin accounts to authenticate.
+    let user = await User.findOne({ storeId, email: sanitizedEmail }).select("+password -__v");
+    if (!user) {
+        const adminUser = await User.findOne({ email: sanitizedEmail, role: "admin" }).select("+password -__v");
+        if (adminUser) {
+            user = adminUser;
+        }
+    }
+
     if (!user) {
         // Generic message: must be identical to the wrong-password case below,
         // otherwise the endpoint becomes a free account-enumeration oracle.
-        return res.status(400).json({ message: "Invalid email or password" })
+        return res.status(400).json({ message: "Invalid email or password" });
     }
 
     if (!password || typeof password !== "string" || !user.password) {
-        return res.status(400).json({ message: "Invalid email or password" })
+        return res.status(400).json({ message: "Invalid email or password" });
     }
 
     const matchPassword = await bcrypt.compare(password, user.password);
     if (!matchPassword) {
-        return res.status(400).json({ message: "Invalid email or password" })
+        return res.status(400).json({ message: "Invalid email or password" });
     }
 
-    const token = generateToken(user._id);
+    const tokenStoreId = user.role === "admin" ? storeId : (user.storeId || storeId);
+    const token = generateToken(user._id, tokenStoreId);
 
     // Set secure, HttpOnly cookie for XSS protection
     const secure = isRequestSecure(req);
@@ -175,23 +190,34 @@ const loginUser = asyncHandler(async (req, res) => {
             email: user.email,
             phone: user.phone,
             role: user.role,
+            storeId: user.storeId || storeId,
         },
         token,
         message: "Login successful",
-    })
+    });
 });
 
 const forgotPassword = asyncHandler(async (req, res) => {
     const { email } = req.body;
+    const storeId = req.store?.id || "handloomer";
 
     if (!email || typeof email !== "string") {
         return res.status(400).json({ message: "Email is required" });
     }
 
     const sanitizedEmail = email.trim().toLowerCase();
-    const user = await User.findOne({
+    let user = await User.findOne({
+        storeId,
         email: { $regex: new RegExp(`^${sanitizedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
     });
+
+    if (!user) {
+        const adminUser = await User.findOne({
+            email: { $regex: new RegExp(`^${sanitizedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+            role: "admin",
+        });
+        if (adminUser) user = adminUser;
+    }
 
     if (!user) {
         return res.status(404).json({
@@ -202,11 +228,12 @@ const forgotPassword = asyncHandler(async (req, res) => {
     // Generate 6-digit OTP (cryptographically secure)
     const otpCode = crypto.randomInt(100000, 1000000).toString();
 
-    // Delete any existing OTP for this email
-    await OTP.deleteMany({ email: user.email, purpose: "password_reset" });
+    // Delete any existing OTP for this email in this store
+    await OTP.deleteMany({ storeId, email: user.email, purpose: "password_reset" });
 
     // Save new purpose-bound OTP with explicit expiration date
     await OTP.create({
+        storeId,
         email: user.email,
         otp: hashOtp(otpCode),
         purpose: "password_reset",
@@ -216,10 +243,10 @@ const forgotPassword = asyncHandler(async (req, res) => {
 
     // Send email with defensive error handling
     try {
-        await emailService.sendPasswordResetOTPEmail(user.email, otpCode);
+        await emailService.sendPasswordResetOTPEmail(user.email, otpCode, storeId);
     } catch (emailErr) {
         console.error("[ForgotPassword] Failed to send reset OTP email:", emailErr);
-        await OTP.deleteMany({ email: user.email, purpose: "password_reset" });
+        await OTP.deleteMany({ storeId, email: user.email, purpose: "password_reset" });
         return res.status(500).json({
             message: "Failed to send reset code email. Please try again in a few moments.",
         });
@@ -233,6 +260,7 @@ const forgotPassword = asyncHandler(async (req, res) => {
 
 const verifyOtp = asyncHandler(async (req, res) => {
     const { email, otp } = req.body;
+    const storeId = req.store?.id || "handloomer";
 
     if (!email || !otp) {
         return res.status(400).json({ message: "Email and OTP are required" });
@@ -249,7 +277,7 @@ const verifyOtp = asyncHandler(async (req, res) => {
 
     const sanitizedEmail = email.trim().toLowerCase();
 
-    const { ok, reason, record, remaining } = await checkResetOtp(sanitizedEmail, otp);
+    const { ok, reason, record, remaining } = await checkResetOtp(sanitizedEmail, otp, storeId);
 
     if (!ok) {
         return res.status(400).json({
@@ -270,6 +298,7 @@ const verifyOtp = asyncHandler(async (req, res) => {
 
 const resetPassword = asyncHandler(async (req, res) => {
     const { email, otp, newPassword } = req.body;
+    const storeId = req.store?.id || "handloomer";
 
     if (!email || !otp || !newPassword) {
         return res.status(400).json({ message: "Email, OTP, and new password are required" });
@@ -288,8 +317,9 @@ const resetPassword = asyncHandler(async (req, res) => {
     const now = new Date();
     const hashed = hashOtp(otp);
 
-    // Atomically find and consume the verified unexpired OTP single-use
+    // Atomically find and consume the verified unexpired OTP single-use for this store
     const consumed = await OTP.findOneAndDelete({
+        storeId,
         email: sanitizedEmail,
         purpose: "password_reset",
         expiresAt: { $gt: now },
@@ -304,7 +334,12 @@ const resetPassword = asyncHandler(async (req, res) => {
     }
 
     // password field is select:false now, so request it explicitly
-    const user = await User.findOne({ email: sanitizedEmail }).select("+password");
+    let user = await User.findOne({ storeId, email: sanitizedEmail }).select("+password");
+    if (!user) {
+        const adminUser = await User.findOne({ email: sanitizedEmail, role: "admin" }).select("+password");
+        if (adminUser) user = adminUser;
+    }
+
     if (!user) {
         return res.status(404).json({ message: "User not found" });
     }
@@ -316,7 +351,7 @@ const resetPassword = asyncHandler(async (req, res) => {
     await user.save();
 
     // Delete any remaining OTPs for this email and purpose so codes cannot be replayed.
-    await OTP.deleteMany({ email: sanitizedEmail, purpose: "password_reset" });
+    await OTP.deleteMany({ storeId, email: sanitizedEmail, purpose: "password_reset" });
 
     res.status(200).json({ message: "Password reset successfully" });
 });
@@ -396,4 +431,121 @@ const updateProfile = asyncHandler(async (req, res) => {
     });
 });
 
-export default { registerUser, loginUser, logoutUser, updateProfile, forgotPassword, verifyOtp, resetPassword }
+// GET /api/user/profile — Fetch current authenticated user's profile and saved addresses
+const getProfile = asyncHandler(async (req, res) => {
+    const user = await User.findById(req.user._id).select("-password -revokedTokens");
+    if (!user) {
+        return res.status(404).json({ message: "User not found" });
+    }
+
+    res.status(200).json({
+        success: true,
+        user: {
+            _id: user._id,
+            name: user.name,
+            email: user.email,
+            phone: user.phone,
+            role: user.role,
+            storeId: user.storeId,
+            address: user.address || [],
+        },
+    });
+});
+
+// POST /api/user/address — Add a new shipping address to user's address book
+const addAddress = asyncHandler(async (req, res) => {
+    const { fullName, mobile, pincode, state, city, address, landmark } = req.body || {};
+
+    if (!fullName || !mobile || !pincode || !state || !city || !address) {
+        return res.status(400).json({ message: "Full name, mobile, pincode, state, city, and address are required" });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+        return res.status(404).json({ message: "User not found" });
+    }
+
+    user.address = user.address || [];
+    user.address.push({
+        fullName: String(fullName).trim(),
+        mobile: String(mobile).trim(),
+        pincode: String(pincode).trim(),
+        state: String(state).trim(),
+        city: String(city).trim(),
+        address: String(address).trim(),
+        landmark: landmark ? String(landmark).trim() : "",
+    });
+
+    await user.save();
+
+    res.status(201).json({
+        success: true,
+        message: "Address saved successfully",
+        address: user.address,
+    });
+});
+
+// PUT /api/user/address/:id — Update an existing address
+const updateAddress = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { fullName, mobile, pincode, state, city, address, landmark } = req.body || {};
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+        return res.status(404).json({ message: "User not found" });
+    }
+
+    const addr = user.address?.id(id);
+    if (!addr) {
+        return res.status(404).json({ message: "Address not found" });
+    }
+
+    if (fullName !== undefined) addr.fullName = String(fullName).trim();
+    if (mobile !== undefined) addr.mobile = String(mobile).trim();
+    if (pincode !== undefined) addr.pincode = String(pincode).trim();
+    if (state !== undefined) addr.state = String(state).trim();
+    if (city !== undefined) addr.city = String(city).trim();
+    if (address !== undefined) addr.address = String(address).trim();
+    if (landmark !== undefined) addr.landmark = String(landmark).trim();
+
+    await user.save();
+
+    res.status(200).json({
+        success: true,
+        message: "Address updated successfully",
+        address: user.address,
+    });
+});
+
+// DELETE /api/user/address/:id — Remove an address from user's address book
+const deleteAddress = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+        return res.status(404).json({ message: "User not found" });
+    }
+
+    user.address = (user.address || []).filter((a) => a._id.toString() !== id);
+    await user.save();
+
+    res.status(200).json({
+        success: true,
+        message: "Address removed successfully",
+        address: user.address,
+    });
+});
+
+export default {
+    registerUser,
+    loginUser,
+    logoutUser,
+    updateProfile,
+    getProfile,
+    addAddress,
+    updateAddress,
+    deleteAddress,
+    forgotPassword,
+    verifyOtp,
+    resetPassword,
+};

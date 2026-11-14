@@ -1,6 +1,11 @@
 import mongoose from "mongoose";
 
 const otpSchema = new mongoose.Schema({
+    storeId: {
+        type: String,
+        default: "handloomer",
+        index: true,
+    },
     email: {
         type: String,
         required: true,
@@ -40,6 +45,7 @@ const otpSchema = new mongoose.Schema({
 });
 
 // Compound indexes for fast, purpose-bound lookups and verification
+otpSchema.index({ storeId: 1, email: 1, purpose: 1, expiresAt: 1 });
 otpSchema.index({ email: 1, purpose: 1, expiresAt: 1 });
 otpSchema.index({ email: 1, createdAt: -1 });
 

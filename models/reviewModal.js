@@ -21,6 +21,11 @@ const reviewSchema = new mongoose.Schema({
         ref: "Product",
         required: true,
     },
+    storeId: {
+        type: String,
+        default: "handloomer",
+        index: true,
+    },
     rating: {
         type: Number,
         required: [true, "Rating is required"],

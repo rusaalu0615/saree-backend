@@ -159,6 +159,10 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
 
+    const storeFilter = req.query?.storeId && req.query.storeId !== "all"
+        ? { storeId: req.query.storeId.trim().toLowerCase() }
+        : {};
+
     const [
         allTimeFinancials,
         thisMonthFinancials,
@@ -173,17 +177,18 @@ const getDashboardStats = asyncHandler(async (req, res) => {
         lowStockProducts,
         outOfStockProducts,
     ] = await Promise.all([
-        Order.aggregate(buildAccountingPipeline({})),
-        Order.aggregate(buildAccountingPipeline({ createdAt: { $gte: thisMonthStart } })),
-        Order.aggregate(buildAccountingPipeline({ createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } })),
-        Order.countDocuments(),
-        Order.countDocuments({ createdAt: { $gte: thisMonthStart } }),
-        Order.countDocuments({ createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
+        Order.aggregate(buildAccountingPipeline(storeFilter)),
+        Order.aggregate(buildAccountingPipeline({ ...storeFilter, createdAt: { $gte: thisMonthStart } })),
+        Order.aggregate(buildAccountingPipeline({ ...storeFilter, createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } })),
+        Order.countDocuments(storeFilter),
+        Order.countDocuments({ ...storeFilter, createdAt: { $gte: thisMonthStart } }),
+        Order.countDocuments({ ...storeFilter, createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
         Order.countDocuments({
+            ...storeFilter,
             status: { $in: ["placed", "confirmed", "processing", "shipped", "in_transit", "out_for_delivery"] },
         }),
-        User.countDocuments(),
-        User.countDocuments({ createdAt: { $gte: thisMonthStart } }),
+        User.countDocuments(storeFilter),
+        User.countDocuments({ ...storeFilter, createdAt: { $gte: thisMonthStart } }),
         Product.countDocuments(),
         Product.countDocuments({ stock: { $gt: 0, $lte: 10 } }),
         Product.countDocuments({ stock: 0 }),
@@ -374,6 +379,9 @@ const getCustomers = asyncHandler(async (req, res) => {
     const search = escapeRegex(rawSearch);
 
     const filter = {};
+    if (req.query.storeId && req.query.storeId !== 'all') {
+        filter.storeId = req.query.storeId.trim().toLowerCase();
+    }
     if (search) {
         filter.$or = [
             { name: { $regex: search, $options: "i" } },
@@ -388,7 +396,7 @@ const getCustomers = asyncHandler(async (req, res) => {
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit)
-            .select("name email phone createdAt")
+            .select("name email phone storeId createdAt")
             .lean(),
         User.countDocuments(filter),
     ]);
@@ -517,7 +525,11 @@ const getCustomers = asyncHandler(async (req, res) => {
  * GET /api/admin/recent-orders — Last 5 orders for dashboard
  */
 const getRecentOrders = asyncHandler(async (req, res) => {
-    const orders = await Order.find()
+    const filter = req.query?.storeId && req.query.storeId !== "all"
+        ? { storeId: req.query.storeId.trim().toLowerCase() }
+        : {};
+
+    const orders = await Order.find(filter)
         .sort({ createdAt: -1 })
         .limit(5)
         .populate("user", "name email")

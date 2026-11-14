@@ -1,6 +1,7 @@
 import PDFDocument from "pdfkit";
 import fs from "fs";
 import path from "path";
+import { getStoreConfig } from "../config/stores.js";
 
 /**
  * Generate a PDF invoice for an order
@@ -10,6 +11,7 @@ import path from "path";
 export const generateInvoicePDF = (order) => {
     return new Promise((resolve, reject) => {
         try {
+            const store = getStoreConfig(order?.storeId);
             const doc = new PDFDocument({ margin: 50, size: "A4" });
             const chunks = [];
 
@@ -21,10 +23,10 @@ export const generateInvoicePDF = (order) => {
             // --- HEADER ---
             doc.fillColor("#444444")
                 .fontSize(20)
-                .text("MS HANDLOOM", 50, 50, { align: "left" }) // Brand Name
+                .text(store.invoiceHeader || store.name, 50, 50, { align: "left" }) // Brand Name
                 .fontSize(10)
-                .text("www.mshandloomer.com", { align: "left" })
-                .text("mshandloom7@gmail.com", { align: "left" });
+                .text(store.domain, { align: "left" })
+                .text(store.supportEmail, { align: "left" });
 
             doc.fontSize(20)
                 .text("INVOICE", 0, 50, { align: "right" })
@@ -101,7 +103,7 @@ export const generateInvoicePDF = (order) => {
             // --- FOOTER ---
             doc.font("Helvetica").fontSize(10);
             doc.text(
-                "Thank you for shopping with Ms Handloom!",
+                `Thank you for shopping with ${store.name}!`,
                 50,
                 700,
                 { align: "center", width: 500 }
