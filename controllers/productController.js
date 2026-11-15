@@ -142,7 +142,7 @@ const getAllProducts = async (req, res) => {
         const { 
             search, q, category, color, material, 
             priceMin, priceMax, isOnSale, isFestive, isNewArrival,
-            isFeatured, isBestSeller, hasVideo,
+            isFeatured, isBestSeller, hasVideo, inStock,
             productCollection, collection,
             sortBy, page, limit, fullData 
         } = req.query;
@@ -242,6 +242,14 @@ const getAllProducts = async (req, res) => {
                         { $or: [{ videoFile: { $exists: false } }, { videoFile: "" }, { videoFile: null }] }
                     ]
                 });
+            }
+        }
+
+        if (inStock !== undefined) {
+            if (inStock === "true" || inStock === true || inStock === "1" || inStock === 1) {
+                andConditions.push({ stock: { $gt: 0 } });
+            } else if (inStock === "false" || inStock === false || inStock === "0" || inStock === 0) {
+                andConditions.push({ stock: { $lte: 0 } });
             }
         }
 

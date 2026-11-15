@@ -309,4 +309,98 @@ describe("Catalog Enhancements & Data Retrieval Suite", () => {
         // Must exclude the isolated current product
         assert.ok(!res.body.products.some(p => p._id.toString() === pIsolated._id.toString()));
     });
+
+    test("12. getAllProducts handles inStock filtering accurately with MongoDB pagination & countDocuments", async () => {
+        const suffix = Date.now().toString().slice(-6);
+
+        // Create one guaranteed in-stock and one guaranteed out-of-stock product in test category
+        const testCategory = `stock-test-${suffix}`;
+
+        const pInStock = await Product.create({
+            name: `Available Saree ${suffix}`,
+            sku: `AVL-${suffix}-GRN`,
+            category: testCategory,
+            material: "Pure Linen",
+            color: "Olive Green",
+            price: 2500,
+            regularPrice: 3500,
+            stock: 8,
+            mainImage: "https://example.com/avail.jpg",
+            galleryImages: [],
+            isNewArrival: false,
+            isOnSale: false,
+            isFeatured: false,
+            isBestSeller: false,
+            shortDescription: "In stock saree",
+            tags: "linen, available",
+            sareeSize: "5.5m",
+            blouseSize: "0.8m",
+            washCare: "Dry clean",
+        });
+        createdProductIds.push(pInStock._id);
+
+        const pOutOfStock = await Product.create({
+            name: `Sold Out Saree ${suffix}`,
+            sku: `SLD-${suffix}-RED`,
+            category: testCategory,
+            material: "Pure Linen",
+            color: "Crimson Red",
+            price: 2900,
+            regularPrice: 3900,
+            stock: 0,
+            mainImage: "https://example.com/soldout.jpg",
+            galleryImages: [],
+            isNewArrival: false,
+            isOnSale: false,
+            isFeatured: false,
+            isBestSeller: false,
+            shortDescription: "Sold out saree",
+            tags: "linen, soldout",
+            sareeSize: "5.5m",
+            blouseSize: "0.8m",
+            washCare: "Dry clean",
+        });
+        createdProductIds.push(pOutOfStock._id);
+
+        // 1. When inStock is omitted: BOTH in-stock and out-of-stock items returned (Legacy compatibility)
+        const reqLegacy = { query: { category: testCategory } };
+        const resLegacy = mockRes();
+        await productController.getAllProducts(reqLegacy, resLegacy);
+        assert.equal(resLegacy.statusCode, 200);
+        assert.equal(resLegacy.body.success, true);
+        assert.equal(resLegacy.body.pagination.totalProducts, 2, "Legacy query returns all 2 products");
+        assert.ok(resLegacy.body.products.some(p => p.sku === pInStock.sku));
+        assert.ok(resLegacy.body.products.some(p => p.sku === pOutOfStock.sku));
+
+        // 2. When inStock="true": ONLY in-stock products returned
+        const reqInStock = { query: { category: testCategory, inStock: "true" } };
+        const resInStock = mockRes();
+        await productController.getAllProducts(reqInStock, resInStock);
+        assert.equal(resInStock.statusCode, 200);
+        assert.equal(resInStock.body.success, true);
+        assert.equal(resInStock.body.pagination.totalProducts, 1, "inStock=true returns totalProducts=1");
+        assert.equal(resInStock.body.pagination.totalPages, 1);
+        assert.equal(resInStock.body.products.length, 1);
+        assert.equal(resInStock.body.products[0].sku, pInStock.sku);
+        assert.ok(resInStock.body.products.every(p => p.stock > 0));
+
+        // 3. When inStock="false": ONLY out-of-stock products returned
+        const reqOutOfStock = { query: { category: testCategory, inStock: "false" } };
+        const resOutOfStock = mockRes();
+        await productController.getAllProducts(reqOutOfStock, resOutOfStock);
+        assert.equal(resOutOfStock.statusCode, 200);
+        assert.equal(resOutOfStock.body.success, true);
+        assert.equal(resOutOfStock.body.pagination.totalProducts, 1, "inStock=false returns totalProducts=1");
+        assert.equal(resOutOfStock.body.products.length, 1);
+        assert.equal(resOutOfStock.body.products[0].sku, pOutOfStock.sku);
+        assert.ok(resOutOfStock.body.products.every(p => p.stock <= 0));
+
+        // 4. Combined with price filter
+        const reqPriceStock = { query: { category: testCategory, inStock: "true", priceMin: "2000", priceMax: "2700" } };
+        const resPriceStock = mockRes();
+        await productController.getAllProducts(reqPriceStock, resPriceStock);
+        assert.equal(resPriceStock.statusCode, 200);
+        assert.equal(resPriceStock.body.products.length, 1);
+        assert.equal(resPriceStock.body.products[0].sku, pInStock.sku);
+    });
 });
