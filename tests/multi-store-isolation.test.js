@@ -71,7 +71,7 @@ test("1. Store configuration contains exactly two stores: 'handloomer' and 'line
     assert.equal(hlConfig.orderPrefix, "HL");
 
     assert.equal(lnConfig.id, "linen");
-    assert.equal(lnConfig.name, "Linen Saree");
+    assert.equal(lnConfig.name, "House of Qalakari");
     assert.equal(lnConfig.orderPrefix, "LS");
 
     assert.deepEqual(VALID_STORE_IDS, ["handloomer", "linen"]);

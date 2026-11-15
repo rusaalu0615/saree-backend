@@ -3,7 +3,7 @@
  * 
  * Supported Stores:
  * - "handloomer": Handloomer (original production store)
- * - "linen": Linen Saree (linen sarees store)
+ * - "linen": House of Qalakari (linen sarees store)
  * 
  * Rules:
  * - Shared: Products, Inventory, Categories, Collections, Admin Dashboard, Razorpay, Shiprocket
@@ -32,9 +32,9 @@ export const STORES = {
   },
   linen: {
     id: "linen",
-    name: "Linen Saree",
-    brandTitle: "LINEN SAREE",
-    legalName: "Linen Saree Handloom Co.",
+    name: "House of Qalakari",
+    brandTitle: "HOUSE OF QALAKARI",
+    legalName: "House of Qalakari Handloom Co.",
     domain: "linensaree.in",
     frontendUrl: process.env.LINEN_FRONTEND_URL || "https://linensaree.in",
     allowedOrigins: [
@@ -50,7 +50,7 @@ export const STORES = {
     supportEmail: "support@linensaree.in",
     supportPhone: "+91 98765 43210",
     orderPrefix: "LS",
-    invoiceHeader: "LINEN SAREE",
+    invoiceHeader: "HOUSE OF QALAKARI",
     invoiceAddress: "Pure Handloom Linen Center, Bhagalpur, Bihar, India",
   },
 };
