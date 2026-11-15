@@ -432,8 +432,8 @@ const createOrder = asyncHandler(async (req, res) => {
                     slug: dbProduct.slug || extra.slug || dbProduct.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)+/g, ""),
                     price: dbProduct.price,
                     quantity: qtyByProduct.get(pid),
-                    image: extra.image || dbProduct.image || "",
-                    sku: dbProduct.sku || extra.sku || "",
+                    image: extra.image || dbProduct.mainImage || dbProduct.image || (dbProduct.galleryImages && dbProduct.galleryImages[0]?.url) || "",
+                    sku: extra.sku || dbProduct.sku || "",
                 };
             }),
             shippingAddress: {
@@ -1762,6 +1762,16 @@ const getUserOrders = asyncHandler(async (req, res) => {
 
     const enrichedOrders = orders.map((order) => {
         const o = order.toObject ? order.toObject() : { ...order };
+    if (Array.isArray(o.items)) {
+        o.items = o.items.map((item) => {
+            const prodRef = item.productId;
+            const prodImg = (prodRef && typeof prodRef === 'object') ? prodRef.mainImage : null;
+            return {
+                ...item,
+                image: item.image || prodImg || '',
+            };
+        });
+    }
         const eligibility = evaluateCancellationEligibility(o, { isCustomer: true });
         o.canCancel = eligibility.canCancel;
         o.cannotCancelReason = eligibility.cannotCancelReason;
@@ -1799,6 +1809,16 @@ const getOrderById = asyncHandler(async (req, res) => {
     if (!order) throw new AppError("Order not found", 404);
 
     const o = order.toObject ? order.toObject() : { ...order };
+    if (Array.isArray(o.items)) {
+        o.items = o.items.map((item) => {
+            const prodRef = item.productId;
+            const prodImg = (prodRef && typeof prodRef === 'object') ? prodRef.mainImage : null;
+            return {
+                ...item,
+                image: item.image || prodImg || '',
+            };
+        });
+    }
     const eligibility = evaluateCancellationEligibility(o, { isCustomer: true });
     o.canCancel = eligibility.canCancel;
     o.cannotCancelReason = eligibility.cannotCancelReason;
@@ -2102,13 +2122,30 @@ const getAllOrders = asyncHandler(async (req, res) => {
             .skip(skip)
             .limit(limit)
             .populate('user', 'name email phone')
+            .populate('items.productId', 'mainImage galleryImages')
             .select('-__v -payment.checkoutTokenHash -payment.razorpaySignature'),
         Order.countDocuments(filter),
     ]);
 
+    const sanitizedOrders = orders.map((order) => {
+        const doc = order.toObject ? order.toObject() : { ...order };
+        if (Array.isArray(doc.items)) {
+            doc.items = doc.items.map((item) => {
+                const prodRef = item.productId;
+                const prodImg = (prodRef && typeof prodRef === 'object') ? (prodRef.mainImage || (Array.isArray(prodRef.galleryImages) && prodRef.galleryImages[0]?.url)) : null;
+                return {
+                    ...item,
+                    productId: (prodRef && typeof prodRef === 'object' && prodRef._id) ? prodRef._id : prodRef,
+                    image: item.image || prodImg || '',
+                };
+            });
+        }
+        return doc;
+    });
+
     res.status(200).json({
         success: true,
-        orders,
+        orders: sanitizedOrders,
         pagination: { page, limit, totalCount: total, totalPages: Math.max(1, Math.ceil(total / limit)) },
     });
 });
